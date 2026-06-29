@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# local-only test corpus (cloned projects); never tracked/published
+/example-projects/

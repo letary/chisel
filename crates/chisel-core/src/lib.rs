@@ -1,0 +1,116 @@
+//! chisel-core — a method-granular bundler for TypeScript SDK-as-globals projects.
+//!
+//! Pipeline (built up across milestones): parse → graph → inject → resolve-types →
+//! method-DCE → chain-fusion → link → emit. M0 wires parse → strip → codegen for a single
+//! entry file so the toolchain is proven end to end.
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use swc_core::common::{Globals, GLOBALS};
+
+pub mod emit;
+pub mod fusion;
+pub mod graph;
+pub mod link;
+pub mod parse;
+pub mod resolve;
+
+/// Output module format.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    /// ES module (what the platform ships).
+    #[default]
+    Esm,
+    /// Self-running script that reads `_creator*` host primitives as free globals (local renderer).
+    Iife,
+}
+
+/// Bundler input: an in-memory file map + an entrypoint.
+#[derive(Debug, Deserialize)]
+pub struct Input {
+    /// path → source. Paths are absolute-ish (`/main.ts`); relative imports resolve against them.
+    pub files: HashMap<String, String>,
+    /// The entry path (must exist in `files`).
+    pub entry: String,
+    /// Inject entries (esbuild `inject:` semantics): every export becomes an ambient global that
+    /// user code may reference without importing. Usually the SDK's `inject.ts`.
+    #[serde(default)]
+    pub inject: Vec<String>,
+    #[serde(default)]
+    pub format: Format,
+    #[serde(default)]
+    pub minify: bool,
+    /// Enable math chain fusion (scalar replacement of `Vec3` chains). Off by default.
+    #[serde(default)]
+    pub fuse: bool,
+    /// Asset path → URL map. `import x from './hero.png'` and `asset('./hero.png')` are resolved to
+    /// the mapped URL (a compile-time string), mirroring the production loader. Unmapped paths fall
+    /// back to the path itself (fine for local testing; the backend supplies real URLs).
+    #[serde(default)]
+    pub assets: HashMap<String, String>,
+    /// Compile-time global substitutions (esbuild `define:` semantics). A free identifier matching a
+    /// key is replaced by the value parsed as a numeric literal — e.g. `DEG2RAD` → `0.0174…`. Only
+    /// numeric values are supported (all the SDK needs); non-numeric entries are ignored.
+    #[serde(default)]
+    pub define: HashMap<String, String>,
+    /// Emit a source map (`Output.map`, standard JSON). `sources` are the original module paths; no
+    /// `sourcesContent` is inlined (the editor already has the files). Fusion-synthesized nodes have
+    /// no original span and map to their nearest real ancestor.
+    #[serde(default)]
+    pub sourcemap: bool,
+}
+
+/// Bundler output. `error` is `Some` on a hard failure (and `code` is empty).
+#[derive(Debug, Serialize, Default)]
+pub struct Output {
+    pub code: String,
+    /// Source map JSON (present only when `Input.sourcemap` was set).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map: Option<String>,
+    pub diagnostics: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Bundle a project. Never panics on user error — failures surface in `Output::error`.
+pub fn bundle(input: Input) -> Output {
+    match bundle_inner(&input) {
+        Ok((code, map)) => Output { code, map, diagnostics: vec![], error: None },
+        Err(e) => Output { code: String::new(), map: None, diagnostics: vec![], error: Some(format!("{e:#}")) },
+    }
+}
+
+fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>)> {
+    if !input.files.contains_key(&input.entry) {
+        anyhow::bail!("Entrypoint not found: {}", input.entry);
+    }
+    for ij in &input.inject {
+        if !input.files.contains_key(ij) {
+            anyhow::bail!("Inject entry not found: {ij}");
+        }
+    }
+
+    let cm = parse::source_map();
+
+    // The whole graph build + link runs inside one GLOBALS scope so every module's marks/contexts
+    // are mutually consistent and `hygiene()` can finalize names across all of them.
+    GLOBALS.set(&Globals::new(), || {
+        let mut entries = vec![input.entry.clone()];
+        entries.extend(input.inject.iter().cloned());
+
+        let mut g = graph::build(&cm, &input.files, &entries, &input.assets, &input.define)?;
+        let entry_id = g.path_to_id[&input.entry];
+        let inject_ids: Vec<usize> = input.inject.iter().map(|p| g.path_to_id[p]).collect();
+
+        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse)?;
+        let (code, map) = emit::codegen(&cm, &merged, input.minify, input.sourcemap)?;
+        // The IIFE wrapper must not add a leading line, or every source-map line would shift by one.
+        let code = match input.format {
+            Format::Esm => code,
+            Format::Iife => format!("(()=>{{{code}}})();\n"),
+        };
+        Ok((code, map))
+    })
+}

@@ -1,0 +1,23 @@
+[package]
+name = "chisel-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+swc_core = { version = "71.0.4", features = [
+    "common",
+    "ecma_ast",
+    "ecma_parser",
+    "ecma_parser_typescript",
+    "ecma_codegen",
+    "ecma_visit",
+    "ecma_utils",
+    "ecma_transforms",
+    "ecma_transforms_typescript",
+    "ecma_minifier",
+    "common_sourcemap",
+] }
