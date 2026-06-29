@@ -1,0 +1,15 @@
+[package]
+name = "chisel-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "chisel"
+path = "src/main.rs"
+
+[dependencies]
+chisel-core = { path = "../chisel-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
