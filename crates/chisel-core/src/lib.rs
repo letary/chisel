@@ -60,6 +60,11 @@ pub struct Input {
     /// no original span and map to their nearest real ancestor.
     #[serde(default)]
     pub sourcemap: bool,
+    /// Instance-method names the host calls by name (so they have no in-bundle caller and would
+    /// otherwise be tree-shaken). They're kept on any *reached* class that defines them. An entry
+    /// ending in `*` is a prefix — e.g. `"_*"` keeps every underscore-prefixed method.
+    #[serde(default)]
+    pub keep: Vec<String>,
 }
 
 /// Bundler output. `error` is `Some` on a hard failure (and `code` is empty).
@@ -104,7 +109,7 @@ fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>)> {
         let entry_id = g.path_to_id[&input.entry];
         let inject_ids: Vec<usize> = input.inject.iter().map(|p| g.path_to_id[p]).collect();
 
-        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse)?;
+        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse, &input.keep)?;
         let (code, map) = emit::codegen(&cm, &merged, input.minify, input.sourcemap)?;
         // The IIFE wrapper must not add a leading line, or every source-map line would shift by one.
         let code = match input.format {

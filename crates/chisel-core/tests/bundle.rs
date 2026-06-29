@@ -7,7 +7,7 @@ use chisel_core::{bundle, Format, Input};
 /// Bundle a set of files. `entry` defaults to `/main.ts`.
 fn run(files: &[(&str, &str)], minify: bool) -> chisel_core::Output {
     let files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
-    bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false })
+    bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default() })
 }
 
 fn ok(files: &[(&str, &str)]) -> String {
@@ -51,6 +51,7 @@ fn run_inject(files: &[(&str, &str)], inject: &[&str]) -> chisel_core::Output {
         assets: Default::default(),
         define: Default::default(),
         sourcemap: false,
+        keep: Default::default(),
     })
 }
 
@@ -187,7 +188,7 @@ fn m4_fusion_inlines_chain_and_dces_methods() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default() });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     // The whole chain is a scalar terminal → fully inlined, no method calls, no Vec3 allocation.
@@ -212,7 +213,7 @@ fn m4_fusion_variable_rooted_chain() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default() });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     assert!(!c.contains(".add(") && !c.contains(".scale(") && !c.contains(".dot("), "chain on typed vars should fully fuse:\n{c}");
@@ -233,7 +234,7 @@ fn m4_fusion_normalize_hoists_hypot_once() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default() });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     assert!(!c.contains(".normalize("), "normalize call should be fused:\n{c}");
@@ -310,7 +311,7 @@ fn m6_define_substitutes_free_global() {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<_, _>>();
     let define = [("DEG2RAD".to_string(), "0.017453292519943295".to_string())].into_iter().collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default() });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("0.017453292519943295"), "DEG2RAD must be substituted:\n{}", out.code);
     assert!(!out.code.contains("DEG2RAD"), "no free DEG2RAD should remain:\n{}", out.code);
@@ -324,7 +325,7 @@ fn m6_define_leaves_local_const_alone() {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<_, _>>();
     let define = [("DEG2RAD".to_string(), "0.017453292519943295".to_string())].into_iter().collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default() });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("Math.PI / 180"), "local const must survive untouched:\n{}", out.code);
 }
@@ -378,7 +379,7 @@ fn m8_source_map_emitted_with_original_sources() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: true });
+    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: true, keep: Default::default() });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let map = out.map.expect("source map should be present when requested");
     assert!(map.contains("\"version\":3") || map.contains("\"version\": 3"), "v3 source map:\n{map}");
@@ -392,9 +393,75 @@ fn m8_no_source_map_unless_requested() {
     assert!(out.map.is_none(), "no map should be emitted when sourcemap is false");
 }
 
+// ---- M9: keep (host-called methods) -------------------------------------------------------------
+
+#[test]
+fn m9_keep_retains_host_called_methods() {
+    // `_emitClick` has no in-bundle caller (the host invokes it) → normally dropped. `keep: ["_*"]`
+    // retains every underscore method on *reached* classes; a non-underscore unused method is still
+    // dropped, and an entirely unused class is not resurrected.
+    let files = [
+        ("/main.ts", "const b = new UIButton()\nb.render()\nconsole.log(b)"),
+        ("/sdk/inject.ts", "export { UIButton } from './ui'\nexport { Unused } from './ui'"),
+        (
+            "/sdk/ui.ts",
+            "export class UIButton {\n  render(): number { return 1 }\n  _emitClick(): number { return 2 }\n  _dead(): number { return 3 }\n  unusedPublic(): number { return 4 }\n}\nexport class Unused {\n  _emitClick(): number { return 9 }\n}",
+        ),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect::<HashMap<_, _>>();
+    let out = bundle(Input {
+        files,
+        entry: "/main.ts".into(),
+        inject: vec!["/sdk/inject.ts".into()],
+        format: Format::Esm,
+        minify: false,
+        fuse: false,
+        assets: Default::default(),
+        define: Default::default(),
+        sourcemap: false,
+        keep: vec!["_*".into()],
+    });
+    assert!(out.error.is_none(), "error: {:?}", out.error);
+    let c = out.code;
+    assert!(c.contains("render()"), "used method kept:\n{c}");
+    assert!(c.contains("_emitClick"), "host-called _emitClick must be kept by _*:\n{c}");
+    assert!(c.contains("_dead"), "_* keeps every underscore method:\n{c}");
+    assert!(!c.contains("unusedPublic"), "non-underscore unused method still DCE'd:\n{c}");
+    assert!(!c.contains("class Unused"), "keep does not resurrect an unreached class:\n{c}");
+}
+
+#[test]
+fn m9_keep_exact_name() {
+    let files = [
+        ("/main.ts", "const b = new W()\nb.use()\nconsole.log(b)"),
+        ("/sdk/inject.ts", "export { W } from './w'"),
+        ("/sdk/w.ts", "export class W {\n  use(): number { return 1 }\n  _emitTouchStart(): number { return 2 }\n  alsoDead(): number { return 3 }\n}"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect::<HashMap<_, _>>();
+    let out = bundle(Input {
+        files,
+        entry: "/main.ts".into(),
+        inject: vec!["/sdk/inject.ts".into()],
+        format: Format::Esm,
+        minify: false,
+        fuse: false,
+        assets: Default::default(),
+        define: Default::default(),
+        sourcemap: false,
+        keep: vec!["_emitTouchStart".into()],
+    });
+    assert!(out.error.is_none(), "error: {:?}", out.error);
+    assert!(out.code.contains("_emitTouchStart"), "exact-named keep method survives:\n{}", out.code);
+    assert!(!out.code.contains("alsoDead"), "other unused method still dropped:\n{}", out.code);
+}
+
 #[test]
 fn m0_missing_entry_errors() {
     let files = [("/a.ts", "export const x = 1")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default() });
     assert!(out.error.as_deref().unwrap_or_default().contains("Entrypoint not found"));
 }

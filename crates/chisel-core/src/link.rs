@@ -320,7 +320,7 @@ fn prop_name_is_pure(k: &PropName) -> bool {
 
 // ---- the linker --------------------------------------------------------------------------------
 
-pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse: bool) -> anyhow::Result<Module> {
+pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse: bool, keep: &[String]) -> anyhow::Result<Module> {
     let n = graph.modules.len();
 
     // --- SDK global map and per-module import maps (for Phase A). ---
@@ -460,6 +460,21 @@ pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse
     let mut work: Vec<Task> = Vec::new();
     for e in &roots {
         edge_task(e, &class_statics, &mut work);
+    }
+    // `keep` — method names the host calls by name (no in-bundle caller), so presence-gating can't
+    // see them. Mark them live so any *reached* class that has them retains them (unreached classes
+    // still drop entirely). An entry ending in `*` is a prefix (`_*` keeps every `_`-prefixed method).
+    for pat in keep {
+        match pat.strip_suffix('*') {
+            Some(prefix) => {
+                for name in classes_with_instance.keys() {
+                    if name.starts_with(prefix) {
+                        work.push(Task::Live(name.clone()));
+                    }
+                }
+            }
+            None => work.push(Task::Live(Atom::from(pat.as_str()))),
+        }
     }
     while let Some(t) = work.pop() {
         match t {
