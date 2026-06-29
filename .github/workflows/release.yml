@@ -1,8 +1,7 @@
 # Build the `chisel` binary for each target and attach it to the GitHub release for the pushed tag.
-# Push a tag (or publish a release, which creates the tag) to trigger:
-#   git tag v0.1.0 && git push origin v0.1.0
+# Push a tag to trigger:  git tag v0.1.0 && git push origin v0.1.0
 # Produces release assets: chisel-<target>.tar.gz (+ .sha256). The linux build is a fully static
-# musl binary (chisel is pure Rust, no C deps) that runs in any linux image — e.g. download it in a
+# musl binary (chisel is pure Rust, no C deps) that runs in any linux image — download it in a
 # Dockerfile, untar to /usr/local/bin/chisel, and pin the tag so builds stay reproducible.
 
 name: release
@@ -15,7 +14,18 @@ permissions:
   contents: write # create the release + upload assets
 
 jobs:
+  # The upload action uploads to an *existing* release, so create it first (idempotent).
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the release for this tag if it doesn't exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
   upload:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
