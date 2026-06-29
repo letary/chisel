@@ -59,12 +59,15 @@ echo '{"files":{"/main.ts":"..."},"entry":"/main.ts","inject":["/inject.ts"],"mi
 ```
 
 Input: `{ files: {path→source}, entry, inject: [paths], format: "esm"|"iife", minify, fuse, define,
-assets, sourcemap }`. Output: `{ code, map?, diagnostics, error? }`.
+assets, sourcemap, keep }`. Output: `{ code, map?, diagnostics, error? }`.
 
 - `inject` — every export of these entries becomes an ambient global (esbuild `inject:` semantics).
 - `define` — compile-time global substitutions (numeric, e.g. `DEG2RAD` → `0.0174…`).
 - `assets` — `path → URL` map for `asset('./x')` / `import x from './x.png'`.
 - `sourcemap` — emit a v3 map in `Output.map` (`sources` are the original module paths).
+- `keep` — instance-method names the **host calls by name** (no in-bundle caller, so DCE can't see
+  them). Kept on any *reached* class that defines them. An entry ending in `*` is a prefix, so
+  `["_*"]` keeps every underscore-prefixed method.
 
 Helpers: `node scripts/run.mjs <file|dir>` runs a quick bundle; `node scripts/robustness.mjs` runs a
 broad JS/TS syntax corpus through the binary and checks each survives.
