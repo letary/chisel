@@ -27,7 +27,27 @@ const TARGETS = {
   "x86_64-pc-windows-msvc":     { os: "win32",  cpu: "x64",   node: "win32-x64",    bin: "chisel.exe" },
 }
 
-const publish = (cwd) => execFileSync("npm", [ "publish", "--access", "public" ], { cwd, stdio: "inherit" })
+// `shell: true` so Windows resolves `npm.cmd` (execFileSync can't find a bare `npm`, and Node 20
+// refuses to spawn .cmd without a shell). All npm args are static literals or a package spec we
+// build ourselves, so shell interpolation is safe.
+const npm = (args, opts = {}) => execFileSync("npm", args, { stdio: "inherit", shell: true, ...opts })
+
+// Skip if this exact version is already on the registry — keeps a re-run after a partial failure
+// idempotent instead of erroring on "cannot publish over previously published version".
+const publish = (cwd, name, version) => {
+  let published
+  try {
+    published = execFileSync("npm", [ "view", `${name}@${version}`, "version" ],
+      { shell: true, encoding: "utf8", stdio: [ "ignore", "pipe", "ignore" ] }).trim()
+  } catch {
+    published = "" // `npm view` exits non-zero when the version (or package) doesn't exist yet
+  }
+  if (published === version) {
+    console.log(`${name}@${version} already published — skipping`)
+    return
+  }
+  npm([ "publish", "--access", "public" ], { cwd })
+}
 
 const [ mode, ...rest ] = process.argv.slice(2)
 
@@ -48,7 +68,7 @@ if (mode === "platform") {
     cpu: [ t.cpu ],
     files: [ t.bin ],
   }, null, 2) + "\n")
-  publish(dir)
+  publish(dir, `${SCOPE}/chisel-${t.node}`, version)
 } else if (mode === "main") {
   const [ version ] = rest
   const src = join(__dirname, "..", "npm", "chisel")
@@ -60,7 +80,7 @@ if (mode === "platform") {
     Object.values(TARGETS).map((t) => [ `${SCOPE}/chisel-${t.node}`, version ]),
   )
   writeFileSync(join(dir, "package.json"), JSON.stringify(pkg, null, 2) + "\n")
-  publish(dir)
+  publish(dir, pkg.name, version)
 } else {
   console.error("usage: npm-publish.mjs platform <rust-target> <version> <binary> | main <version>")
   process.exit(2)
