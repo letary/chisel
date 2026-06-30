@@ -1,8 +1,9 @@
-# Build the `chisel` binary for each target and attach it to the GitHub release for the pushed tag.
-# Push a tag to trigger:  git tag v0.1.0 && git push origin v0.1.0
-# Produces release assets: chisel-<target>.tar.gz (+ .sha256). The linux build is a fully static
-# musl binary (chisel is pure Rust, no C deps) that runs in any linux image — download it in a
-# Dockerfile, untar to /usr/local/bin/chisel, and pin the tag so builds stay reproducible.
+# On a `v*` tag: build chisel for every platform, attach archives to the GitHub release, and publish
+# the npm packages (esbuild-style per-platform distribution: @letary/chisel-<platform> + the
+# @letary/chisel resolver). Push a tag to trigger:  git tag v0.1.2 && git push origin v0.1.2
+#
+# Prerequisites (set once): an NPM_TOKEN repo secret with publish rights to the @letary scope.
+# (Change the scope in scripts/npm-publish.mjs and npm/chisel/index.js if you use a different one.)
 
 name: release
 
@@ -14,7 +15,6 @@ permissions:
   contents: write # create the release + upload assets
 
 jobs:
-  # The upload action uploads to an *existing* release, so create it first (idempotent).
   create-release:
     runs-on: ubuntu-latest
     steps:
@@ -24,21 +24,71 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
 
-  upload:
+  build:
     needs: create-release
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest } # production (static)
-          - { target: aarch64-apple-darwin,       os: macos-latest }  # local dev (Apple Silicon)
+          - { target: aarch64-apple-darwin,        os: macos-latest }     # mac arm64 (native)
+          - { target: x86_64-apple-darwin,         os: macos-latest }     # mac x64 (cross from arm64)
+          - { target: x86_64-unknown-linux-musl,   os: ubuntu-latest }    # linux x64 (static)
+          - { target: aarch64-unknown-linux-musl,  os: ubuntu-24.04-arm } # linux arm64 (static, native)
+          - { target: x86_64-pc-windows-msvc,      os: windows-latest }   # windows x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          bin: chisel
-          target: ${{ matrix.target }}
-          archive: $bin-$target
-          checksum: sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Archive + upload to the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then BIN=chisel.exe; else BIN=chisel; fi
+          mkdir -p dist && cp "target/${{ matrix.target }}/release/$BIN" "dist/$BIN"
+          [ "$BIN" = "chisel" ] && strip "dist/$BIN" || true
+          ( cd dist
+            if [ "$BIN" = "chisel.exe" ]; then
+              7z a "chisel-${{ matrix.target }}.zip" "$BIN" >/dev/null
+              gh release upload "$GITHUB_REF_NAME" "chisel-${{ matrix.target }}.zip" --clobber
+            else
+              tar czf "chisel-${{ matrix.target }}.tar.gz" "$BIN"
+              gh release upload "$GITHUB_REF_NAME" "chisel-${{ matrix.target }}.tar.gz" --clobber
+            fi )
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish the platform npm package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then BIN=chisel.exe; else BIN=chisel; fi
+          node scripts/npm-publish.mjs platform "${{ matrix.target }}" "${GITHUB_REF_NAME#v}" "dist/$BIN"
+
+  publish-main:
+    needs: build # platform packages must exist before the resolver references them
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish @letary/chisel (the resolver)
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/npm-publish.mjs main "${GITHUB_REF_NAME#v}"

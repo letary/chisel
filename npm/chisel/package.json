@@ -1,0 +1,15 @@
+{
+  "name": "@letary/chisel",
+  "version": "0.0.0",
+  "description": "Method-granular bundler with math fusion (Rust/SWC) — resolves the platform binary.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/letary/chisel.git"
+  },
+  "license": "MIT",
+  "main": "index.js",
+  "files": [
+    "index.js"
+  ],
+  "optionalDependencies": {}
+}
