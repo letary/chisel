@@ -51,7 +51,12 @@ disappear from the bundle too.
 
 ## Use
 
+Build from source, or install the prebuilt binary from npm (resolves your platform automatically via
+optional `@letary/chisel-<platform>` packages — macOS/Linux/Windows, x64/arm64):
+
 ```sh
+npm i @letary/chisel        # then: require("@letary/chisel").binaryPath()
+# — or build from source —
 cargo build --release
 # JSON over stdio:
 echo '{"files":{"/main.ts":"..."},"entry":"/main.ts","inject":["/inject.ts"],"minify":true}' \
