@@ -14,6 +14,7 @@ pub mod fusion;
 pub mod graph;
 pub mod link;
 pub mod parse;
+pub mod reactive_ui;
 pub mod resolve;
 
 /// Output module format.
@@ -65,6 +66,11 @@ pub struct Input {
     /// ending in `*` is a prefix — e.g. `"_*"` keeps every underscore-prefixed method.
     #[serde(default)]
     pub keep: Vec<String>,
+    /// Reactive-UI desugaring: memoize `.map` inside children bindings (`__uiMap`) and auto-wrap
+    /// signal-reading text/style expressions in arrows. Keys on free references to the SDK's
+    /// injected globals, so it only ever fires in user code. Off by default.
+    #[serde(default)]
+    pub reactive_ui: bool,
 }
 
 /// Bundler output. `error` is `Some` on a hard failure (and `code` is empty).
@@ -105,7 +111,7 @@ fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>)> {
         let mut entries = vec![input.entry.clone()];
         entries.extend(input.inject.iter().cloned());
 
-        let mut g = graph::build(&cm, &input.files, &entries, &input.assets, &input.define)?;
+        let mut g = graph::build(&cm, &input.files, &entries, &input.assets, &input.define, input.reactive_ui)?;
         let entry_id = g.path_to_id[&input.entry];
         let inject_ids: Vec<usize> = input.inject.iter().map(|p| g.path_to_id[p]).collect();
 
