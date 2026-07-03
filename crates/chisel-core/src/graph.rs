@@ -14,6 +14,7 @@ use swc_core::ecma::transforms::base::resolver;
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 
 use crate::parse;
+use crate::reactive_ui;
 use crate::resolve;
 
 /// A specifier that imports a non-JS/TS file is an asset (`./hero.png`, `./model.glb`, `./font.ttf`).
@@ -244,6 +245,7 @@ pub fn build(
     entries: &[String],
     assets: &HashMap<String, String>,
     define: &HashMap<String, String>,
+    reactive_ui: bool,
 ) -> anyhow::Result<ModuleGraph> {
     let exists = |p: &str| files.contains_key(p);
     let define_exprs = parse_define(define);
@@ -286,6 +288,11 @@ pub fn build(
         // Substitute `define`d free globals (DEG2RAD/RAD2DEG → numeric literals).
         if !define_exprs.is_empty() {
             module.visit_mut_with(&mut DefineSubst { define: &define_exprs, unresolved_ctxt });
+        }
+        // Reactive-UI desugaring (memoized children maps + auto-wrapped signal reads). Keys on
+        // free (unresolved) references to the injected globals, so SDK modules are inert.
+        if reactive_ui {
+            reactive_ui::apply(&path, unresolved_ctxt, &mut module);
         }
 
         let mut imports: Vec<(String, Vec<ImportSpec>)> = Vec::new();
