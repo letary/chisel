@@ -9,7 +9,9 @@ things general bundlers (esbuild, Rollup, Rolldown) structurally can't:
   keep every method. chisel discovers classes/members structurally from the AST and drops the long
   tail of unused methods (and everything only they pulled in).
 - **Math chain fusion** — lower a `Vec3`-style method chain like `a.add(b).scale(s).dot(c)` to scalar
-  arithmetic at compile time, so no intermediate objects are allocated.
+  arithmetic at compile time, so no intermediate objects are allocated. The same scalar-replacement
+  machinery also fuses single-scalar value types: a `date()` chain like `date(x).add(1,'day').format(p)`
+  lowers to `formatImpl(toMs(x) + 86400000, p)` — the wrapper never allocates.
 
 Plus the usual: scope-hoisting linker, an import-free `inject` mechanism, the real SWC minifier
 (compress + mangle), source maps, ESM/IIFE output. Status: **working prototype**, see [PLAN.md](./PLAN.md).
@@ -42,6 +44,13 @@ a scalar terminal like `.dot()`/`.length()` allocates nothing at all. Works for 
 `cross` components, the length in `normalize` — are **hoisted into a `const` temp** so nothing is
 recomputed (`Math.hypot` runs once); control-flow bodies are block-ified and arrow expression-bodies
 become blocks so the temp always lands in the right scope.
+
+The same pass fuses **`date()` chains** — the single-scalar (epoch-ms) analog of a Vec3. Roots are the
+`date(...)` factory (or a typed local); linear-unit `add`/`subtract` (ms…week) become scalar ms math;
+scalar terminals (`diff`/`valueOf`/`unix`/`isBefore`/…) allocate nothing; and the materializing
+terminals `format`/`timeAgo` lower to the SDK's module-private `formatImpl`/`timeAgoImpl(ms, …)`. An
+escaping linear chain rebuilds exactly one wrapper (`new DateValue(ms)`); calendar units (`month`/
+`year`) and local-tz `startOf`/`endOf` aren't closed-form, so those chains are left as real calls.
 
 Validated **bit-exact** against the un-fused output over 800+ randomized values — variable-rooted
 per-frame blocks, `normalize`/`length`/`distanceTo`, inside loops and arrow callbacks — since JS

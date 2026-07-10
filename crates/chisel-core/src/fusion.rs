@@ -442,3 +442,292 @@ pub fn fuse_module(module: &mut Module, vec3: Key) -> usize {
     module.visit_mut_with(&mut f);
     f.fused
 }
+
+// ================================================================================================
+// Date chain fusion (single-scalar: epoch milliseconds).
+// ================================================================================================
+//
+// A `date(...)` value (SDK `DateValue`) is the 1-component analog of a Vec3 chain: its one scalar is
+// epoch-ms. A chain `date(x).add(1,"day").format(p)` lowers to `formatImpl(toMs(x) + 86400000, p)` —
+// the wrapper and every intermediate never allocate; only an *escaping* date (one stored/returned as
+// a value) materializes back into `new DateValue(ms)`, exactly like `new_vec3` for Vec3.
+//
+// The lowering mirrors the wrapper's method bodies operation-for-operation, so it is bit-identical:
+//   • root `date(x)` → `toMs(x)`  (`date()` → `Date.now()`); a typed local `d` → `d.t`.
+//   • `add`/`subtract` with a LINEAR unit (ms…week) → `m ± n*MS` (calendar month/year bail → the
+//     whole chain is left as real method calls, like an unsupported Vec3 method).
+//   • scalar terminals `valueOf`/`unix`/`diff`/`isBefore`/`isAfter`/`isSame` → number/bool.
+//   • materializing terminals `format`/`timeAgo` → the module-private `formatImpl`/`timeAgoImpl`.
+// `startOf`/`endOf` are local-timezone dependent (not closed-form ms math) and are left to the real
+// method. See packages/sdk/src/runtime/datetime.ts — its `t` field, immutability, and the `*Impl`
+// free functions exist for this pass.
+
+/// Milliseconds per linear unit — must match `MS` in datetime.ts exactly (integer f64 → bit-exact).
+/// `None` marks the calendar units (month/year), which are not closed-form and are left un-fused.
+fn unit_ms(u: &str) -> Option<f64> {
+    Some(match u {
+        "ms" => 1.0,
+        "second" => 1000.0,
+        "minute" => 60_000.0,
+        "hour" => 3_600_000.0,
+        "day" => 86_400_000.0,
+        "week" => 604_800_000.0,
+        _ => return None,
+    })
+}
+
+/// Methods that return a `DateValue` — for local-variable type inference (broader than the fusable
+/// set: `startOf`/`endOf` produce a date we can decompose via `.t` even though we can't lower them).
+const DATE_TYPED_METHODS: &[&str] = &["add", "subtract", "startOf", "endOf"];
+
+/// Identities the date-fuser emits references to. All share the date module's `top_level_ctxt`; the
+/// linker verifies the helper bindings exist before enabling the pass.
+pub struct DateCtx {
+    pub date: Key,          // the `date(value?)` factory global
+    pub date_value: Key,    // the `DateValue` class (for materialized escapes)
+    pub to_ms: Key,         // toMs(value): number
+    pub format_impl: Key,   // formatImpl(ms, pattern, locale?): string
+    pub time_ago_impl: Key, // timeAgoImpl(ms, locale, nowMs): string
+}
+
+pub struct DateFuser<'a> {
+    ctx: &'a DateCtx,
+    date_vars: HashSet<Key>,
+    pub fused: usize,
+}
+
+impl<'a> VisitMut for DateFuser<'a> {
+    fn visit_mut_expr(&mut self, e: &mut Expr) {
+        // A final value (string / number / bool) — the common case.
+        if let Some(s) = self.date_terminal(&*e) {
+            self.fused += 1;
+            *e = paren(s);
+            return;
+        }
+        // A date-returning chain (`…add/subtract…`) used as a value → rebuild one wrapper.
+        if is_date_returning_call(&*e) {
+            if let Some(ms) = self.fuse_date(&*e) {
+                self.fused += 1;
+                *e = new_date_value(ms, &self.ctx.date_value);
+                return;
+            }
+        }
+        e.visit_mut_children_with(self);
+    }
+}
+
+impl<'a> DateFuser<'a> {
+    /// Fuse an expression that evaluates to a `DateValue` into its epoch-ms scalar. `None` if the
+    /// expression isn't a recognized date root/chain, or a chain hits a non-fusable method.
+    fn fuse_date(&self, e: &Expr) -> Option<Expr> {
+        match e {
+            Expr::Paren(p) => self.fuse_date(&p.expr),
+            Expr::Ident(id) if self.date_vars.contains(&(id.sym.clone(), id.ctxt)) => Some(field(id, "t")),
+            Expr::Call(call) => {
+                if let Callee::Expr(callee) = &call.callee {
+                    if let Expr::Ident(id) = &**callee {
+                        if (id.sym.clone(), id.ctxt) == self.ctx.date {
+                            return self.date_root(&call.args);
+                        }
+                    }
+                }
+                let (obj, method, args) = as_method_call(call)?;
+                let m = self.fuse_date(obj)?;
+                self.apply_date_method(m, &method, args)
+            }
+            _ => None,
+        }
+    }
+
+    /// `date(x)` → `toMs(x)` (fusing `x` if it is itself a date); `date()` → `Date.now()`.
+    fn date_root(&self, args: &[ExprOrSpread]) -> Option<Expr> {
+        match args.first() {
+            None => Some(global_call("Date", "now", vec![])),
+            Some(a) if a.spread.is_none() => Some(self.to_ms_of((*a.expr).clone())),
+            _ => None,
+        }
+    }
+
+    /// Normalize any `DateInput` expression to epoch-ms: fuse it if it's a date, else wrap `toMs`.
+    fn to_ms_of(&self, e: Expr) -> Expr {
+        match self.fuse_date(&e) {
+            Some(ms) => ms,
+            None => call_key(&self.ctx.to_ms, vec![e]),
+        }
+    }
+
+    /// Date-returning methods. Only linear-unit `add`/`subtract` fuse to scalar math.
+    fn apply_date_method(&self, m: Expr, method: &str, args: &[ExprOrSpread]) -> Option<Expr> {
+        match method {
+            "add" | "subtract" => {
+                let n = nth(args, 0)?;
+                let ms = unit_ms(&str_lit_of(&nth(args, 1)?)?)?;
+                let term = bin(n, BinaryOp::Mul, num(ms));
+                let op = if method == "add" { BinaryOp::Add } else { BinaryOp::Sub };
+                Some(bin(m, op, term))
+            }
+            _ => None,
+        }
+    }
+
+    /// A method call on a date whose result is a final non-date value (string / number / bool).
+    fn date_terminal(&self, e: &Expr) -> Option<Expr> {
+        let Expr::Call(call) = e else { return None };
+        let (obj, method, args) = as_method_call(call)?;
+        let m = self.fuse_date(obj)?;
+        match method.as_str() {
+            "format" => {
+                let pattern = nth(args, 0).unwrap_or_else(|| str_lit("D MMMM YYYY"));
+                let mut a = vec![m, pattern];
+                if let Some(loc) = nth(args, 1) {
+                    a.push(loc);
+                }
+                Some(call_key(&self.ctx.format_impl, a))
+            }
+            "timeAgo" => {
+                let loc = nth(args, 0).unwrap_or_else(void0);
+                let now = match nth(args, 1) {
+                    Some(nw) => self.to_ms_of(nw),
+                    None => global_call("Date", "now", vec![]),
+                };
+                Some(call_key(&self.ctx.time_ago_impl, vec![m, loc, now]))
+            }
+            "valueOf" => Some(m),
+            "unix" => Some(global_call("Math", "floor", vec![bin(m, BinaryOp::Div, num(1000.0))])),
+            "diff" => {
+                let other = self.to_ms_of(nth(args, 0)?);
+                let unit = match nth(args, 1) {
+                    Some(u) => str_lit_of(&u)?,
+                    None => "ms".to_string(),
+                };
+                let per = unit_ms(&unit)?;
+                Some(global_call("Math", "trunc", vec![bin(bin(m, BinaryOp::Sub, other), BinaryOp::Div, num(per))]))
+            }
+            "isBefore" => Some(bin(m, BinaryOp::Lt, self.to_ms_of(nth(args, 0)?))),
+            "isAfter" => Some(bin(m, BinaryOp::Gt, self.to_ms_of(nth(args, 0)?))),
+            "isSame" => Some(bin(m, BinaryOp::EqEqEq, self.to_ms_of(nth(args, 0)?))),
+            _ => None,
+        }
+    }
+}
+
+fn is_date_returning_call(e: &Expr) -> bool {
+    if let Expr::Call(call) = e {
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(MemberExpr { prop: MemberProp::Ident(name), .. }) = &**callee {
+                return matches!(name.sym.as_str(), "add" | "subtract");
+            }
+        }
+    }
+    false
+}
+
+// ---- Date value type inference for local variables (mirrors the Vec3 fixpoint) -----------------
+
+fn is_date_typed(e: &Expr, date: &Key, vars: &HashSet<Key>) -> bool {
+    match e {
+        Expr::Paren(p) => is_date_typed(&p.expr, date, vars),
+        Expr::Ident(id) => vars.contains(&(id.sym.clone(), id.ctxt)),
+        Expr::Call(call) => {
+            if let Callee::Expr(callee) = &call.callee {
+                match &**callee {
+                    Expr::Ident(id) => (id.sym.clone(), id.ctxt) == *date,
+                    Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) => {
+                        DATE_TYPED_METHODS.contains(&name.sym.as_str()) && is_date_typed(obj, date, vars)
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn collect_date_vars(module: &Module, date: &Key) -> HashSet<Key> {
+    let mut scan = VarScan { decls: Vec::new() };
+    module.visit_with(&mut scan);
+    let mut vars = HashSet::new();
+    loop {
+        let mut changed = false;
+        for (k, init) in &scan.decls {
+            if !vars.contains(k) && is_date_typed(init, date, &vars) {
+                vars.insert(k.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    vars
+}
+
+/// Run date fusion over a module. Returns the number of chains fused.
+pub fn fuse_dates_module(module: &mut Module, ctx: &DateCtx) -> usize {
+    let date_vars = collect_date_vars(module, &ctx.date);
+    let mut f = DateFuser { ctx, date_vars, fused: 0 };
+    module.visit_mut_with(&mut f);
+    f.fused
+}
+
+// ---- extra AST constructors for date lowering --------------------------------------------------
+
+fn nth(args: &[ExprOrSpread], i: usize) -> Option<Expr> {
+    args.get(i).filter(|a| a.spread.is_none()).map(|a| (*a.expr).clone())
+}
+
+fn str_lit_of(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Lit(Lit::Str(s)) => s.value.as_str().map(|x| x.to_string()),
+        Expr::Paren(p) => str_lit_of(&p.expr),
+        _ => None,
+    }
+}
+
+fn str_lit(s: &str) -> Expr {
+    Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: Atom::from(s).into(), raw: None }))
+}
+
+fn void0() -> Expr {
+    Expr::Unary(UnaryExpr { span: DUMMY_SP, op: UnaryOp::Void, arg: Box::new(num(0.0)) })
+}
+
+/// A call to a top-level binding by its `(name, ctxt)` identity (survives DCE + minify consistently).
+fn call_key(key: &Key, args: Vec<Expr>) -> Expr {
+    let callee = Expr::Ident(Ident::new(key.0.clone(), DUMMY_SP, key.1));
+    Expr::Call(CallExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        callee: Callee::Expr(Box::new(callee)),
+        args: args.into_iter().map(|e| ExprOrSpread { spread: None, expr: Box::new(e) }).collect(),
+        type_args: None,
+    })
+}
+
+/// A call to a host global's method, e.g. `Date.now()` / `Math.trunc(x)`.
+fn global_call(obj: &str, method: &str, args: Vec<Expr>) -> Expr {
+    let callee = Expr::Member(MemberExpr {
+        span: DUMMY_SP,
+        obj: Box::new(Expr::Ident(plain_ident(obj))),
+        prop: MemberProp::Ident(IdentName::new(Atom::from(method), DUMMY_SP)),
+    });
+    Expr::Call(CallExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        callee: Callee::Expr(Box::new(callee)),
+        args: args.into_iter().map(|e| ExprOrSpread { spread: None, expr: Box::new(e) }).collect(),
+        type_args: None,
+    })
+}
+
+fn new_date_value(ms: Expr, key: &Key) -> Expr {
+    Expr::New(NewExpr {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        callee: Box::new(Expr::Ident(Ident::new(key.0.clone(), DUMMY_SP, key.1))),
+        args: Some(vec![ExprOrSpread { spread: None, expr: Box::new(ms) }]),
+        type_args: None,
+    })
+}

@@ -364,6 +364,38 @@ pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse
                 crate::fusion::fuse_module(&mut graph.modules[i].module, key.clone());
             }
         }
+        // Date chains: the `date()` value type. Enabled only when its module still declares the
+        // internal helpers the lowering emits references to (so it degrades safely if datetime.ts
+        // is refactored). All date-module top-levels share `date`'s top_level_ctxt.
+        if let Some(t) = sdk_map.get(&Atom::from("date")) {
+            let ctxt = t.ctxt;
+            let mut names: HashSet<Atom> = HashSet::new();
+            for m in &graph.modules {
+                if m.top_level_ctxt != ctxt {
+                    continue;
+                }
+                for item in &m.module.body {
+                    if let Some(decl) = item_decl(item) {
+                        for k in binding_keys_of_decl(decl, ctxt) {
+                            names.insert(k.0);
+                        }
+                    }
+                }
+            }
+            let need = ["DateValue", "toMs", "formatImpl", "timeAgoImpl"];
+            if need.iter().all(|nm| names.contains(&Atom::from(*nm))) {
+                let ctx = crate::fusion::DateCtx {
+                    date: (t.sym.clone(), ctxt),
+                    date_value: (Atom::from("DateValue"), ctxt),
+                    to_ms: (Atom::from("toMs"), ctxt),
+                    format_impl: (Atom::from("formatImpl"), ctxt),
+                    time_ago_impl: (Atom::from("timeAgoImpl"), ctxt),
+                };
+                for i in 0..n {
+                    crate::fusion::fuse_dates_module(&mut graph.modules[i].module, &ctx);
+                }
+            }
+        }
     }
 
     let user: HashSet<usize> = reachable_from(graph, entry_id);

@@ -221,6 +221,87 @@ fn m4_fusion_variable_rooted_chain() {
     assert!(c.contains("new Vec3(1, 2, 3)"), "roots kept:\n{c}");
 }
 
+// ---- date chain fusion (single-scalar) --------------------------------------------------------
+
+// A minimal `date()` SDK matching the real contract: a factory + immutable `DateValue` holding one
+// scalar `t`, with the module-private `toMs`/`formatImpl`/`timeAgoImpl` the fuser lowers terminals to.
+const DATE_SDK: &str = "\
+const toMs = (v: any): number => v instanceof DateValue ? v.t : (typeof v === 'number' ? v : new Date(v).getTime())\n\
+const formatImpl = (ms: number, p: string, l?: any): string => new Date(ms).toISOString() + p\n\
+const timeAgoImpl = (ms: number, l: any, now: number): string => (now - ms) + 'ago'\n\
+const MS: any = { day: 86400000, hour: 3600000, minute: 60000 }\n\
+export class DateValue {\n\
+  constructor(public t: number) {}\n\
+  format(p = 'D', l?: any): string { return formatImpl(this.t, p, l) }\n\
+  timeAgo(l?: any, now = Date.now()): string { return timeAgoImpl(this.t, l, toMs(now)) }\n\
+  add(n: number, u: string): DateValue { const ms = MS[u]; if (ms !== undefined) return new DateValue(this.t + n * ms); const d = new Date(this.t); d.setMonth(d.getMonth() + n); return new DateValue(d.getTime()) }\n\
+  subtract(n: number, u: string): DateValue { return this.add(-n, u) }\n\
+  diff(o: any, u = 'ms'): number { return Math.trunc((this.t - toMs(o)) / (MS[u] || 1)) }\n\
+  isBefore(o: any): boolean { return this.t < toMs(o) }\n\
+  valueOf(): number { return this.t }\n\
+}\n\
+export const date = (v: any = Date.now()): DateValue => new DateValue(toMs(v))\n";
+
+fn fuse_date_bundle(main: &str) -> String {
+    let files = [("/main.ts", main), ("/sdk/inject.ts", "export { date } from './date'"), ("/sdk/date.ts", DATE_SDK)]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<HashMap<_, _>>();
+    let out = bundle(Input {
+        files,
+        entry: "/main.ts".into(),
+        inject: vec!["/sdk/inject.ts".into()],
+        format: Format::Esm,
+        minify: false,
+        fuse: true,
+        assets: Default::default(),
+        define: Default::default(),
+        sourcemap: false,
+        keep: Default::default(),
+        reactive_ui: false,
+    });
+    assert!(out.error.is_none(), "error: {:?}", out.error);
+    out.code
+}
+
+#[test]
+fn date_fusion_lowers_chain_to_free_function() {
+    // `date(x).add(1,'day').subtract(30,'minute').format('D')` → `formatImpl(toMs(x) + … - …, 'D')`.
+    let c = fuse_date_bundle("const r = date(1e12).add(1,'day').subtract(30,'minute').format('D')\nconsole.log(r)");
+    assert!(!c.contains(".add("), "add fused away:\n{c}");
+    assert!(!c.contains(".subtract("), "subtract fused away:\n{c}");
+    assert!(!c.contains(".format("), "format fused to formatImpl:\n{c}");
+    assert!(c.contains("formatImpl("), "terminal lowered to the free function:\n{c}");
+    assert!(!c.contains("new DateValue"), "no wrapper allocated for a string terminal:\n{c}");
+    // The linear-unit constants are inlined as scalar math.
+    assert!(c.contains("86400000") && c.contains("60000"), "unit math inlined:\n{c}");
+}
+
+#[test]
+fn date_fusion_scalar_terminal_allocates_nothing() {
+    // `date(a).diff(date(b),'day')` → `Math.trunc((toMs(a) - toMs(b)) / 86400000)`, zero wrappers.
+    let c = fuse_date_bundle("const r = date(2e12).diff(date(1e12), 'day')\nconsole.log(r)");
+    assert!(!c.contains(".diff("), "diff fused away:\n{c}");
+    assert!(!c.contains("new DateValue"), "both date() wrappers eliminated:\n{c}");
+    assert!(c.contains("Math.trunc") && c.contains("86400000"), "scalar diff inlined:\n{c}");
+}
+
+#[test]
+fn date_fusion_typed_local_and_escaping_value() {
+    // A typed local decomposes via `.t`; an escaping linear chain rebuilds exactly one wrapper.
+    let c = fuse_date_bundle("const f = date(1e12).add(10,'day')\nconsole.log(date(1e12).isBefore(f), f.valueOf())\n");
+    assert!(!c.contains(".isBefore("), "isBefore fused to `<`:\n{c}");
+    assert!(!c.contains(".valueOf("), "valueOf fused to `.t`:\n{c}");
+    assert!(c.contains("new DateValue"), "escaping fused date materializes one wrapper:\n{c}");
+}
+
+#[test]
+fn date_fusion_leaves_calendar_units_alone() {
+    // `month`/`year` aren't closed-form ms math → the chain is left as real method calls (correct).
+    let c = fuse_date_bundle("const r = date(2e12).add(1,'month').format('D')\nconsole.log(r)");
+    assert!(c.contains(".add("), "calendar-unit add must NOT fuse (falls back):\n{c}");
+}
+
 #[test]
 fn m4_fusion_normalize_hoists_hypot_once() {
     let files = [
