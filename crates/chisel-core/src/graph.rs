@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use swc_core::atoms::{Atom, Wtf8Atom};
 use swc_core::common::sync::Lrc;
+use swc_core::common::util::take::Take;
 use swc_core::common::{Mark, SourceMap, SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::transforms::base::resolver;
@@ -77,15 +78,20 @@ fn default_decl_to_item(decl: DefaultDecl, ctxt: SyntaxContext) -> ModuleItem {
     }
 }
 
-/// Pre-parse `define` values into replacement expressions (numeric literals only).
+/// Pre-parse `define` values into replacement expressions (numeric or boolean literals).
 fn parse_define(define: &HashMap<String, String>) -> HashMap<String, Expr> {
     define
         .iter()
         .filter_map(|(k, v)| {
-            v.trim()
-                .parse::<f64>()
-                .ok()
-                .map(|n| (k.clone(), Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value: n, raw: None }))))
+            let v = v.trim();
+            let expr = match v {
+                "true" | "false" => Some(Expr::Lit(Lit::Bool(Bool { span: DUMMY_SP, value: v == "true" }))),
+                _ => v
+                    .parse::<f64>()
+                    .ok()
+                    .map(|n| Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value: n, raw: None }))),
+            };
+            expr.map(|e| (k.clone(), e))
         })
         .collect()
 }
@@ -106,6 +112,72 @@ impl VisitMut for DefineSubst<'_> {
                 }
             }
         }
+    }
+}
+
+/// The literal boolean value of an expression, if it is one (through parens).
+fn bool_lit(e: &Expr) -> Option<bool> {
+    match e {
+        Expr::Lit(Lit::Bool(b)) => Some(b.value),
+        Expr::Paren(p) => bool_lit(&p.expr),
+        _ => None,
+    }
+}
+
+/// Folds boolean-literal branches after `define` substitution, so `if (EDITOR) { … }` under
+/// `EDITOR: "false"` disappears from the AST *before* linking — anything referenced only from the
+/// dead branch loses its last edge and is tree-shaken like ordinary unused code. Handles `!b`,
+/// `b && x` / `b || x`, `b ? a : c`, and `if (b)` statements (bottom-up, so `if (!EDITOR)` folds
+/// too). Caveat: `var`/function hoisting out of a dropped branch is not preserved — the SDK and
+/// project code are `let`/`const` TS, where this cannot be observed.
+struct ConstFold;
+
+impl VisitMut for ConstFold {
+    fn visit_mut_expr(&mut self, e: &mut Expr) {
+        e.visit_mut_children_with(self);
+        let folded = match e {
+            Expr::Unary(u) if u.op == UnaryOp::Bang => {
+                bool_lit(&u.arg).map(|b| Expr::Lit(Lit::Bool(Bool { span: u.span, value: !b })))
+            }
+            Expr::Bin(b) if b.op == BinaryOp::LogicalAnd => {
+                bool_lit(&b.left).map(|l| *(if l { b.right.take() } else { b.left.take() }))
+            }
+            Expr::Bin(b) if b.op == BinaryOp::LogicalOr => {
+                bool_lit(&b.left).map(|l| *(if l { b.left.take() } else { b.right.take() }))
+            }
+            Expr::Cond(c) => bool_lit(&c.test).map(|t| *(if t { c.cons.take() } else { c.alt.take() })),
+            _ => None,
+        };
+        if let Some(f) = folded {
+            *e = f;
+        }
+    }
+
+    fn visit_mut_stmt(&mut self, s: &mut Stmt) {
+        s.visit_mut_children_with(self);
+        if let Stmt::If(i) = s {
+            if let Some(t) = bool_lit(&i.test) {
+                *s = if t {
+                    *i.cons.take()
+                } else {
+                    match i.alt.take() {
+                        Some(alt) => *alt,
+                        None => Stmt::Empty(EmptyStmt { span: i.span }),
+                    }
+                };
+            }
+        }
+    }
+
+    // Prune the empty statements folding leaves behind (statement lists + module top level).
+    fn visit_mut_stmts(&mut self, stmts: &mut Vec<Stmt>) {
+        stmts.visit_mut_children_with(self);
+        stmts.retain(|s| !matches!(s, Stmt::Empty(_)));
+    }
+
+    fn visit_mut_module_items(&mut self, items: &mut Vec<ModuleItem>) {
+        items.visit_mut_children_with(self);
+        items.retain(|i| !matches!(i, ModuleItem::Stmt(Stmt::Empty(_))));
     }
 }
 
@@ -285,9 +357,13 @@ pub fn build(
 
         // Desugar `asset("./x")` calls to their URL string (compile-time macro).
         module.visit_mut_with(&mut AssetDesugar { assets, unresolved_ctxt });
-        // Substitute `define`d free globals (DEG2RAD/RAD2DEG → numeric literals).
+        // Substitute `define`d free globals (DEG2RAD/RAD2DEG → numeric literals, EDITOR → a
+        // boolean), then fold the branches boolean defines decide.
         if !define_exprs.is_empty() {
             module.visit_mut_with(&mut DefineSubst { define: &define_exprs, unresolved_ctxt });
+            if define_exprs.values().any(|e| matches!(e, Expr::Lit(Lit::Bool(_)))) {
+                module.visit_mut_with(&mut ConstFold);
+            }
         }
         // Reactive-UI desugaring (memoized children maps + auto-wrapped signal reads). Keys on
         // free (unresolved) references to the injected globals, so SDK modules are inert.
