@@ -411,6 +411,70 @@ fn m6_define_leaves_local_const_alone() {
     assert!(out.code.contains("Math.PI / 180"), "local const must survive untouched:\n{}", out.code);
 }
 
+/// Bundle with a boolean `EDITOR` define + the SDK inject (the scene-editor phase-10 shape).
+fn run_editor_define(files: &[(&str, &str)], value: &str) -> chisel_core::Output {
+    let files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
+    let define = [("EDITOR".to_string(), value.to_string())].into_iter().collect();
+    bundle(Input {
+        files,
+        entry: "/main.ts".into(),
+        inject: vec!["/sdk/inject.ts".into()],
+        format: Format::Esm,
+        minify: false,
+        fuse: false,
+        assets: Default::default(),
+        define,
+        sourcemap: false,
+        keep: Default::default(),
+        reactive_ui: false,
+    })
+}
+
+#[test]
+fn m6_boolean_define_folds_branches_and_dces() {
+    // `if (EDITOR) { … }` under EDITOR=false must disappear entirely — including the edge that
+    // kept `registerTool` alive. Ternary / `&&` / `!` fold too.
+    let files: &[(&str, &str)] = &[
+        (
+            "/main.ts",
+            "if (EDITOR) { registerTool('scatter') }\n\
+             const label = EDITOR ? 'edit' : 'play'\n\
+             EDITOR && console.log('editor only')\n\
+             if (!EDITOR) { console.log('production only') }\n\
+             console.log(label)",
+        ),
+        ("/sdk/inject.ts", "export { registerTool } from './tools'"),
+        ("/sdk/tools.ts", "export function registerTool(name: string): void { console.log('tool', name) }"),
+    ];
+
+    let off = run_editor_define(files, "false");
+    assert!(off.error.is_none(), "error: {:?}", off.error);
+    assert!(!off.code.contains("registerTool"), "dead-branch callee must be DCE'd:\n{}", off.code);
+    assert!(!off.code.contains("scatter"), "dead branch body must be folded away:\n{}", off.code);
+    assert!(!off.code.contains("editor only"), "`EDITOR && …` must fold away:\n{}", off.code);
+    assert!(off.code.contains("'play'") && !off.code.contains("'edit'"), "ternary must fold to the alt:\n{}", off.code);
+    assert!(off.code.contains("production only"), "`if (!EDITOR)` must keep its branch:\n{}", off.code);
+    assert!(!off.code.contains("EDITOR"), "no free EDITOR should remain:\n{}", off.code);
+
+    let on = run_editor_define(files, "true");
+    assert!(on.error.is_none(), "error: {:?}", on.error);
+    assert!(on.code.contains("registerTool"), "live branch must keep its callee:\n{}", on.code);
+    assert!(on.code.contains("'edit'") && !on.code.contains("'play'"), "ternary must fold to the cons:\n{}", on.code);
+    assert!(!on.code.contains("production only"), "`if (!EDITOR)` must fold away:\n{}", on.code);
+}
+
+#[test]
+fn m6_boolean_define_leaves_local_binding_alone() {
+    // A local `EDITOR` binding must not be substituted or folded.
+    let files: &[(&str, &str)] = &[("/main.ts", "const EDITOR = compute()\nfunction compute(): boolean { return Math.random() > 0.5 }\nif (EDITOR) { console.log('maybe') }")];
+    let files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
+    let define = [("EDITOR".to_string(), "false".to_string())].into_iter().collect();
+    let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false });
+    assert!(out.error.is_none(), "error: {:?}", out.error);
+    assert!(out.code.contains("if (EDITOR)"), "local EDITOR branch must survive:\n{}", out.code);
+    assert!(out.code.contains("maybe"), "local EDITOR branch body must survive:\n{}", out.code);
+}
+
 #[test]
 fn m6_default_export_import_resolves_url() {
     // The production asset shape: an asset is a real `export default "<url>"` module, imported by
