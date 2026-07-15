@@ -612,3 +612,21 @@ fn m0_missing_entry_errors() {
     let out = bundle(Input { files, entry: "/main.ts".into(), inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false });
     assert!(out.error.as_deref().unwrap_or_default().contains("Entrypoint not found"));
 }
+
+// Relinking an import-local that appears as a shorthand object property (`{ user }`) must not
+// rename the *key* — only the value side. Regression: an icon map `{ user, calendar, ... }` of
+// default svg imports collapsed into duplicate `__chisel_default` keys.
+#[test]
+fn m1_shorthand_prop_key_survives_relink() {
+    let code = ok(&[
+        (
+            "/main.ts",
+            "import user from './user'\nimport { cal as calendar } from './cal'\nconst m = { user, calendar }\nconsole.log(m[Object.keys(m)[0]])",
+        ),
+        ("/user.ts", "const v = 'USER_SVG'\nexport default v"),
+        ("/cal.ts", "export const cal = 'CAL_SVG'"),
+    ]);
+    assert!(code.contains("user:"), "shorthand key `user` was renamed away:\n{code}");
+    assert!(code.contains("calendar:"), "shorthand key `calendar` was renamed away:\n{code}");
+    assert!(!code.contains("__chisel_default:"), "origin binding name leaked into an object key:\n{code}");
+}
