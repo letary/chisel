@@ -42,19 +42,39 @@ struct Relinker<'a> {
     sdk_map: &'a HashMap<Atom, Target>,
 }
 
+impl Relinker<'_> {
+    fn target_for(&self, id: &Ident) -> Option<&Target> {
+        if id.ctxt == self.top_ctxt {
+            self.import_map.get(&id.sym)
+        } else if id.ctxt == self.unresolved_ctxt {
+            self.sdk_map.get(&id.sym)
+        } else {
+            None
+        }
+    }
+}
+
 impl VisitMut for Relinker<'_> {
     fn visit_mut_ident(&mut self, id: &mut Ident) {
-        if id.ctxt == self.top_ctxt {
-            if let Some(t) = self.import_map.get(&id.sym) {
-                id.sym = t.sym.clone();
-                id.ctxt = t.ctxt;
-            }
-        } else if id.ctxt == self.unresolved_ctxt {
-            if let Some(t) = self.sdk_map.get(&id.sym) {
-                id.sym = t.sym.clone();
-                id.ctxt = t.ctxt;
+        if let Some(t) = self.target_for(id) {
+            id.sym = t.sym.clone();
+            id.ctxt = t.ctxt;
+        }
+    }
+
+    /// In `{ user }` the ident is key *and* value — relinking it in place would rename the key.
+    /// Expand to `user: <origin>` so only the value side is rewritten.
+    fn visit_mut_prop(&mut self, p: &mut Prop) {
+        if let Prop::Shorthand(id) = p {
+            if self.target_for(id).is_some() {
+                let key = PropName::Ident(IdentName::new(id.sym.clone(), id.span));
+                let mut value = id.clone();
+                self.visit_mut_ident(&mut value);
+                *p = Prop::KeyValue(KeyValueProp { key, value: Box::new(Expr::Ident(value)) });
+                return;
             }
         }
+        p.visit_mut_children_with(self);
     }
 }
 
