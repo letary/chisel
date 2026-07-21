@@ -55,6 +55,12 @@ fn run_inject(files: &[(&str, &str)], inject: &[&str]) -> chisel_core::Output {
     })
 }
 
+fn ok_inject(files: &[(&str, &str)], inject: &[&str]) -> String {
+    let out = run_inject(files, inject);
+    assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
+    out.code
+}
+
 #[test]
 fn m1_links_relative_imports() {
     let code = ok(&[
@@ -629,4 +635,101 @@ fn m1_shorthand_prop_key_survives_relink() {
     assert!(code.contains("user:"), "shorthand key `user` was renamed away:\n{code}");
     assert!(code.contains("calendar:"), "shorthand key `calendar` was renamed away:\n{code}");
     assert!(!code.contains("__chisel_default:"), "origin binding name leaked into an object key:\n{code}");
+}
+
+// ---- attached statements: SDK statics survive without becoming unconditional side effects ------
+
+/// The SDK pattern that motivated this: a callable factory plus ambient statics attached after the
+/// declaration. Under a plain `sideEffects: false` drop these vanish silently and `UIPager.push`
+/// is `undefined` at runtime, in bundled builds only.
+const PAGER_SDK: &str = "
+export const UIPager = (...a) => ({ tabs: a })
+const stack = []
+export const activate = (p) => stack.push(p)
+Object.defineProperty(UIPager, 'current', { get: () => stack[stack.length - 1] ?? null })
+UIPager.push = (s) => { stack[stack.length - 1]?.push(s) }
+UIPager.pop = () => { stack[stack.length - 1]?.pop() }
+";
+
+#[test]
+fn attach_sdk_statics_ride_along_with_their_binding() {
+    let code = ok_inject(
+        &[
+            ("/__sdk/pager.ts", PAGER_SDK),
+            ("/__sdk/inject.ts", "export { UIPager, activate } from './pager.ts'"),
+            ("/main.ts", "UIPager.push(1)\nconsole.log(UIPager.current)"),
+        ],
+        &["/__sdk/inject.ts"],
+    );
+    assert!(code.contains("UIPager.push ="), "static assignment dropped:\n{code}");
+    assert!(code.contains("UIPager.pop ="), "static assignment dropped:\n{code}");
+    assert!(code.contains("defineProperty"), "accessor attach dropped:\n{code}");
+    // and they must land AFTER the declaration they attach to, or the bundle throws on init.
+    let decl = code.find("const UIPager").expect("declaration missing");
+    assert!(decl < code.find("UIPager.push =").unwrap(), "attached stmt emitted before its decl:\n{code}");
+}
+
+#[test]
+fn attach_does_not_resurrect_an_unreached_binding() {
+    // main never mentions UIPager → the binding and everything attached to it must still vanish.
+    let code = ok_inject(
+        &[
+            ("/__sdk/pager.ts", PAGER_SDK),
+            ("/__sdk/inject.ts", "export { UIPager, activate } from './pager.ts'"),
+            ("/main.ts", "console.log('hi')"),
+        ],
+        &["/__sdk/inject.ts"],
+    );
+    assert!(!code.contains("UIPager"), "attached stmts resurrected a dead binding:\n{code}");
+    assert!(!code.contains("defineProperty"), "attached stmts resurrected a dead binding:\n{code}");
+}
+
+#[test]
+fn attach_holds_back_its_references_until_the_anchor_is_reached() {
+    // `helper` is referenced ONLY by a statement attached to the unused `Widget`. Attaching must not
+    // seed roots eagerly, or `helper` (and its whole cone) gets pulled into every bundle.
+    let code = ok_inject(
+        &[
+            (
+                "/__sdk/w.ts",
+                "export const helper = () => 'HELPER_BODY'\nexport const Widget = () => 1\nWidget.make = () => helper()\nexport const other = () => 2",
+            ),
+            ("/__sdk/inject.ts", "export { helper, Widget, other } from './w.ts'"),
+            ("/main.ts", "console.log(other())"),
+        ],
+        &["/__sdk/inject.ts"],
+    );
+    assert!(!code.contains("HELPER_BODY"), "attached stmt eagerly pulled its refs:\n{code}");
+    assert!(!code.contains("Widget"), "unused anchor kept:\n{code}");
+}
+
+#[test]
+fn attach_is_narrow_a_bare_call_is_still_dropped() {
+    // Only *mutation of the binding* attaches. A call that merely passes it somewhere stays a plain
+    // SDK side effect (dropped) — otherwise `sideEffects: false` would mean nothing.
+    let code = ok_inject(
+        &[
+            (
+                "/__sdk/r.ts",
+                "export const registry = new Map()\nexport const thing = () => 1\nregistry.set('SENTINEL_SIDE_EFFECT', thing)",
+            ),
+            ("/__sdk/inject.ts", "export { registry, thing } from './r.ts'"),
+            ("/main.ts", "console.log(thing(), registry)"),
+        ],
+        &["/__sdk/inject.ts"],
+    );
+    assert!(!code.contains("SENTINEL_SIDE_EFFECT"), "a bare call should stay dropped in the SDK:\n{code}");
+}
+
+#[test]
+fn attach_works_for_a_class_anchor_and_keeps_user_side_effects_untouched() {
+    let code = ok_inject(
+        &[
+            ("/__sdk/c.ts", "export class Widget { run() { return 1 } }\nWidget.CLASS_STATIC = 7"),
+            ("/__sdk/inject.ts", "export { Widget } from './c.ts'"),
+            ("/main.ts", "const w = new Widget()\nconsole.log(w.run(), Widget.CLASS_STATIC)"),
+        ],
+        &["/__sdk/inject.ts"],
+    );
+    assert!(code.contains("CLASS_STATIC"), "class-anchored static dropped:\n{code}");
 }

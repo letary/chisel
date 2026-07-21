@@ -10,7 +10,9 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import vm from "node:vm"
 
-const bin = ["target/release/chisel", "target/debug/chisel"].map((p) => join(import.meta.dirname, "..", p)).find(existsSync)
+const bin = ["target/release/chisel", "target/debug/chisel"]
+  .flatMap((p) => [p, p + ".exe"])   // .exe so the sweep runs on Windows too
+  .map((p) => join(import.meta.dirname, "..", p)).find(existsSync)
 if (!bin) { console.error("build chisel first"); process.exit(2) }
 const showOnly = process.argv.includes("--show") ? process.argv[process.argv.indexOf("--show") + 1] : null
 

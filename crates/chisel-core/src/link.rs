@@ -11,7 +11,9 @@
 //! everything only they pulled in all fall away. User modules get the *same* demand-driven DCE — an
 //! unused pure declaration / unused export is dropped, its own class members are method-DCE'd — with
 //! one difference: a **side-effecting** top-level statement in user code is a root (always kept and
-//! emitted), whereas in the SDK (`sideEffects: false`) it is dropped.
+//! emitted), whereas in the SDK (`sideEffects: false`) it is dropped — *unless* it mutates one of
+//! that module's own top-level bindings (`X.y = …`, `Object.defineProperty(X, …)`), which makes it
+//! part of `X`'s declaration: kept iff `X` is reached, and its references are held back until then.
 //! Phase C — **concatenate** kept items/members in dependency order, unwrapping `export`.
 //! Phase D — **hygiene()** finalizes globally-unique names; emit one `Module`.
 
@@ -230,23 +232,94 @@ enum ItemKind {
     /// A pure declaration (function / class / simple-binding const with a pure initializer) → becomes
     /// a reachability unit, kept only if something live references it.
     PureDecl,
+    /// An SDK top-level statement that *mutates one of this module's own top-level bindings*
+    /// (`X.y = …`, `X.a.b = …`, `Object.defineProperty(X, …)`). Semantically it is part of `X`'s
+    /// declaration, so it rides along with it: kept iff `X` is reached, dropped otherwise. Without
+    /// this the `sideEffects: false` contract deletes it unconditionally and `X.y` is `undefined`
+    /// at runtime — silently, and only in bundled builds.
+    AttachedTo(Key),
 }
 
-fn classify_item(item: &ModuleItem, is_user: bool) -> ItemKind {
+fn classify_item(item: &ModuleItem, is_user: bool, ctxt: SyntaxContext) -> ItemKind {
     match item {
         ModuleItem::Stmt(Stmt::Decl(d)) => classify_decl(d, is_user),
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(e)) => classify_decl(&e.decl, is_user),
         // imports + re-exports carry no runtime behavior we keep at this stage.
         ModuleItem::ModuleDecl(_) => ItemKind::Drop,
-        // any other top-level statement (expr / if / loop / ...) is a side effect in user code,
-        // and dead in the SDK.
+        // any other top-level statement (expr / if / loop / ...) is a side effect in user code. In
+        // the SDK it is dead *unless* it mutates a binding this module declares, in which case it
+        // is attached to that binding rather than dropped.
         ModuleItem::Stmt(_) => {
             if is_user {
                 ItemKind::SideEffect
             } else {
-                ItemKind::Drop
+                match attach_anchor(item, ctxt) {
+                    Some(k) => ItemKind::AttachedTo(k),
+                    None => ItemKind::Drop,
+                }
             }
         }
+    }
+}
+
+fn unparen(e: &Expr) -> &Expr {
+    match e {
+        Expr::Paren(p) => unparen(&p.expr),
+        other => other,
+    }
+}
+
+/// A top-level binding of *this* module (same `SyntaxContext`). Cross-module anchors are rejected:
+/// after identity unification such an ident carries the origin module's ctxt, and attaching to it
+/// would make emit order depend on module ordering rather than plain source order.
+fn same_module_binding(e: &Expr, ctxt: SyntaxContext) -> Option<Key> {
+    match unparen(e) {
+        Expr::Ident(id) if id.ctxt == ctxt => Some((id.sym.clone(), id.ctxt)),
+        _ => None,
+    }
+}
+
+/// Base object of a (possibly nested) member expression: `X.a.b` → `X`.
+fn member_base(m: &MemberExpr, ctxt: SyntaxContext) -> Option<Key> {
+    match unparen(&m.obj) {
+        Expr::Member(inner) => member_base(inner, ctxt),
+        other => same_module_binding(other, ctxt),
+    }
+}
+
+/// The binding a top-level statement mutates, if it is one of the recognised "this is really part of
+/// the declaration" shapes. Deliberately narrow: only *mutation of the binding itself* qualifies. A
+/// call that merely passes it somewhere (`register(X)`) does not — that is an ordinary side effect,
+/// and honouring it would gut the `sideEffects: false` contract.
+fn attach_anchor(item: &ModuleItem, ctxt: SyntaxContext) -> Option<Key> {
+    let ModuleItem::Stmt(Stmt::Expr(es)) = item else { return None };
+    match unparen(&es.expr) {
+        // `X.y = …`, `X.a.b = …`, `X.y ??= …`
+        Expr::Assign(a) => match &a.left {
+            AssignTarget::Simple(SimpleAssignTarget::Member(m)) => member_base(m, ctxt),
+            _ => None,
+        },
+        // `Object.defineProperty(X, …)` and friends — the standard way to attach a live accessor.
+        Expr::Call(c) => {
+            let Callee::Expr(callee) = &c.callee else { return None };
+            let Expr::Member(m) = unparen(callee) else { return None };
+            let Expr::Ident(obj) = unparen(&m.obj) else { return None };
+            let MemberProp::Ident(name) = &m.prop else { return None };
+            if &*obj.sym != "Object"
+                || !matches!(
+                    &*name.sym,
+                    "defineProperty" | "defineProperties" | "assign" | "freeze" | "seal" | "setPrototypeOf"
+                )
+            {
+                return None;
+            }
+            let first = c.args.first()?;
+            if first.spread.is_some() {
+                return None;
+            }
+            same_module_binding(&first.expr, ctxt)
+        }
+        _ => None,
     }
 }
 
@@ -456,16 +529,25 @@ pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse
     // --- build reachability units + seed roots from user code. ---
     let mut unit_edges: HashMap<Unit, Vec<Edge>> = HashMap::new();
     let mut roots: Vec<Edge> = Vec::new();
+    // Edges owed by SDK statements that mutate a binding — drained into the worklist if and when
+    // that binding is reached (see `ItemKind::AttachedTo`).
+    let mut pending: HashMap<Key, Vec<Edge>> = HashMap::new();
 
     for (mid, m) in graph.modules.iter().enumerate() {
         let is_user = user.contains(&mid);
         let ctxt = m.top_level_ctxt;
         for item in &m.module.body {
-            match classify_item(item, is_user) {
+            match classify_item(item, is_user, ctxt) {
                 ItemKind::Drop => continue,
                 // A user side effect must run → its references are reachability roots.
                 ItemKind::SideEffect => {
                     roots.extend(edges_of(|c| item.visit_with(c), &class_keys, &binding_keys));
+                }
+                // Not a root: it only runs if its anchor survives, so its refs are held back until
+                // then — otherwise attaching a statement would drag its whole reference set in.
+                ItemKind::AttachedTo(anchor) => {
+                    let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys);
+                    pending.entry(anchor).or_default().extend(e);
                 }
                 // A pure decl becomes unit(s); its references are pulled only if the unit is reached.
                 ItemKind::PureDecl => match item_decl(item) {
@@ -547,6 +629,15 @@ pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse
                     }
                     Unit::Decl(_) => {}
                 }
+                // A binding going live pulls the top-level statements that mutate it (and, only
+                // now, whatever those statements reference).
+                if let Unit::Decl(k) | Unit::Core(k) = &u {
+                    if let Some(edges) = pending.remove(k) {
+                        for e in &edges {
+                            edge_task(e, &class_statics, &mut work);
+                        }
+                    }
+                }
                 if let Some(edges) = unit_edges.get(&u) {
                     for e in edges.clone() {
                         edge_task(&e, &class_statics, &mut work);
@@ -614,9 +705,14 @@ pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse
         let is_user = user.contains(&mid);
         let ctxt = m.top_level_ctxt;
         for item in &m.module.body {
-            match classify_item(item, is_user) {
+            match classify_item(item, is_user, ctxt) {
                 ItemKind::Drop => continue,
                 ItemKind::SideEffect => body.push(unwrap_export(item)),
+                ItemKind::AttachedTo(k) => {
+                    if anchor_reached(&k, &reached) {
+                        body.push(unwrap_export(item));
+                    }
+                }
                 ItemKind::PureDecl => match item_decl(item) {
                     Some(Decl::Class(cd)) => {
                         let key = (cd.ident.sym.clone(), ctxt);
@@ -718,10 +814,16 @@ fn emit_class(item: &ModuleItem, key: &Key, reached: &HashSet<Unit>) -> ModuleIt
     ModuleItem::Stmt(Stmt::Decl(decl))
 }
 
+/// A binding is live if its decl unit is reached — or, for a class, its core.
+fn anchor_reached(k: &Key, reached: &HashSet<Unit>) -> bool {
+    reached.contains(&Unit::Decl(k.clone())) || reached.contains(&Unit::Core(k.clone()))
+}
+
 fn item_is_kept(item: &ModuleItem, mid: usize, ctxt: SyntaxContext, user: &HashSet<usize>, reached: &HashSet<Unit>) -> bool {
-    match classify_item(item, user.contains(&mid)) {
+    match classify_item(item, user.contains(&mid), ctxt) {
         ItemKind::Drop => false,
         ItemKind::SideEffect => true,
+        ItemKind::AttachedTo(k) => anchor_reached(&k, reached),
         ItemKind::PureDecl => match item_decl(item) {
             Some(Decl::Class(cd)) => reached.contains(&Unit::Core((cd.ident.sym.clone(), ctxt))),
             Some(d) => binding_keys_of_decl(d, ctxt).iter().any(|k| reached.contains(&Unit::Decl(k.clone()))),
