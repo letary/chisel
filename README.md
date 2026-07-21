@@ -101,7 +101,13 @@ parse (SWC, owned AST) → module graph (resolve + TS-strip) → Phase A: unify 
   (`.name(...)` anywhere reachable; a dynamic `obj[expr]` call keeps all — a numeric index `v[0]` does
   not). The same pass shakes user modules: unused pure decls / exports are dropped and user classes are
   method-DCE'd, while side-effecting top-level statements and `import './setup'` side-effect imports are
-  kept; injected SDK modules are pulled purely on demand.
+  kept; injected SDK modules are pulled purely on demand. One exception keeps the `sideEffects: false`
+  contract honest: an SDK top-level statement that *mutates a binding that module declares*
+  (`X.y = …`, `X.a.b = …`, `Object.defineProperty(X, …)`) counts as part of `X`'s declaration — kept
+  iff `X` is reached, dropped with it otherwise, and its references are held back until then. Without
+  that, the common "callable factory + ambient statics" shape loses its statics silently, and only in
+  bundled builds. A statement that merely *passes* the binding somewhere (`register(X)`) is still an
+  ordinary side effect, and still dropped.
 - **Minify** runs the real SWC minifier (compress + top-level mangle). The fully-linked bundle is one
   closed scope with no exports, so every top-level binding is private and renameable; free identifiers
   are exactly the host globals, which the resolver marks `unresolved` so they pass through by name.
