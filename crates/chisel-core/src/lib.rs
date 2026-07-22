@@ -16,6 +16,7 @@ pub mod link;
 pub mod parse;
 pub mod reactive_ui;
 pub mod resolve;
+pub mod scan;
 
 /// Output module format.
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
@@ -33,8 +34,13 @@ pub enum Format {
 pub struct Input {
     /// path → source. Paths are absolute-ish (`/main.ts`); relative imports resolve against them.
     pub files: HashMap<String, String>,
-    /// The entry path (must exist in `files`).
+    /// The entry path (must exist in `files`). Required unless `scan` is set.
+    #[serde(default)]
     pub entry: String,
+    /// Scan mode: no bundling — parse every JS/TS module in `files` and return `Output.scan`
+    /// (resolved local imports + hasExports per file). All other options are ignored.
+    #[serde(default)]
+    pub scan: bool,
     /// Inject entries (esbuild `inject:` semantics): every export becomes an ambient global that
     /// user code may reference without importing. Usually the SDK's `inject.ts`.
     #[serde(default)]
@@ -83,13 +89,19 @@ pub struct Output {
     pub diagnostics: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Scan-mode result (`Input.scan`): path → imports/hasExports per JS/TS module.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan: Option<HashMap<String, scan::ScanModule>>,
 }
 
 /// Bundle a project. Never panics on user error — failures surface in `Output::error`.
 pub fn bundle(input: Input) -> Output {
+    if input.scan {
+        return Output { scan: Some(scan::scan(&input.files)), ..Default::default() };
+    }
     match bundle_inner(&input) {
-        Ok((code, map)) => Output { code, map, diagnostics: vec![], error: None },
-        Err(e) => Output { code: String::new(), map: None, diagnostics: vec![], error: Some(format!("{e:#}")) },
+        Ok((code, map)) => Output { code, map, ..Default::default() },
+        Err(e) => Output { error: Some(format!("{e:#}")), ..Default::default() },
     }
 }
 

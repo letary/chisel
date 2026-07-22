@@ -3,6 +3,9 @@
 //! Protocol:
 //!   stdin : { "files": { "/main.ts": "..." }, "entry": "/main.ts", "format": "esm", "minify": false }
 //!   stdout: { "code": "...", "diagnostics": [], "error": null }
+//! Scan mode (no bundling — per-module imports/exports facts):
+//!   stdin : { "files": { … }, "scan": true }
+//!   stdout: { "code": "", "scan": { "/main.ts": { "imports": ["/util.ts"], "hasExports": false } } }
 //!
 //! Exit codes: 0 ok · 1 compile error (error field set) · 2 bad invocation / unreadable input.
 
@@ -20,12 +23,7 @@ fn main() {
     let input: Input = match serde_json::from_str(&buf) {
         Ok(i) => i,
         Err(e) => {
-            emit(&Output {
-                code: String::new(),
-                map: None,
-                diagnostics: vec![],
-                error: Some(format!("invalid input json: {e}")),
-            });
+            emit(&Output { error: Some(format!("invalid input json: {e}")), ..Default::default() });
             std::process::exit(2);
         }
     };
