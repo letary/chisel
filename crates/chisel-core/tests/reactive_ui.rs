@@ -21,7 +21,7 @@ fn run(main: &str, reactive_ui: bool) -> String {
     files.insert("/sdk/inject.ts".to_string(), SDK.to_string());
     let out = bundle(Input {
         files,
-        entry: "/main.ts".into(),
+        entry: "/main.ts".into(), scan: false,
         inject: vec!["/sdk/inject.ts".into()],
         format: Format::Esm,
         minify: false,

@@ -82,6 +82,10 @@ assets, sourcemap, keep }`. Output: `{ code, map?, diagnostics, error? }`.
 - `keep` — instance-method names the **host calls by name** (no in-bundle caller, so DCE can't see
   them). Kept on any *reached* class that defines them. An entry ending in `*` is a prefix, so
   `["_*"]` keeps every underscore-prefixed method.
+- `scan: true` — no bundling: parse every JS/TS module in `files` (`.d.ts` skipped) and return
+  `Output.scan = { path: { imports: [resolved paths], hasExports } }` — the dependency facts entry
+  detection needs before an entry is known. `entry` is not required in this mode; per-file parse
+  failures land in that file's `error` field instead of failing the scan.
 
 Helpers: `node scripts/run.mjs <file|dir>` runs a quick bundle; `node scripts/robustness.mjs` runs a
 broad JS/TS syntax corpus through the binary and checks each survives.
