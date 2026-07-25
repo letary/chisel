@@ -117,6 +117,18 @@ fn style_object_values_are_wrapped_per_property() {
 }
 
 #[test]
+fn class_batch_values_are_wrapped_per_property() {
+    // `.class({...})` (the SDK's style-class proxy batch form) takes boolean | () => boolean —
+    // same wrap rule as style values.
+    let code = run(
+        "const on = signal(false)\nconst t = UIText({}, 'x')\nt && (t as any).class({ active: on.value, done: true })\nconsole.log(t)",
+        true,
+    );
+    assert!(has(&code, "active: () =>"), ".class() value not wrapped:\n{code}");
+    assert!(!has(&code, "done: () =>"), "static class value must stay static:\n{code}");
+}
+
+#[test]
 fn already_wrapped_and_non_signal_expressions_are_untouched() {
     let code = run(
         "const count = signal(0)\nconst a = UIText(() => '' + count.value)\nconst b = UIText('static')\nconst n = 1\nconst c = UIText('' + n)\nconsole.log(a, b, c)",
