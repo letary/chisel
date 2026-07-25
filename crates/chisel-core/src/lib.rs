@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use swc_core::common::{Globals, GLOBALS};
 
+pub mod curve;
 pub mod emit;
 pub mod fusion;
 pub mod graph;
@@ -100,12 +101,14 @@ pub fn bundle(input: Input) -> Output {
         return Output { scan: Some(scan::scan(&input.files)), ..Default::default() };
     }
     match bundle_inner(&input) {
-        Ok((code, map)) => Output { code, map, ..Default::default() },
+        Ok((code, map, diagnostics)) => Output { code, map, diagnostics, ..Default::default() },
         Err(e) => Output { error: Some(format!("{e:#}")), ..Default::default() },
     }
 }
 
-fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>)> {
+/// `(code, source map, diagnostics)`. Diagnostics are non-fatal build-time findings (today: particle
+/// curve chains that native would reject at set time) — `path:line:col: message`.
+fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>, Vec<String>)> {
     if !input.files.contains_key(&input.entry) {
         anyhow::bail!("Entrypoint not found: {}", input.entry);
     }
@@ -127,13 +130,14 @@ fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>)> {
         let entry_id = g.path_to_id[&input.entry];
         let inject_ids: Vec<usize> = input.inject.iter().map(|p| g.path_to_id[p]).collect();
 
-        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse, &input.keep)?;
+        let mut diagnostics = Vec::new();
+        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse, &input.keep, &cm, &mut diagnostics)?;
         let (code, map) = emit::codegen(&cm, &merged, input.minify, input.sourcemap)?;
         // The IIFE wrapper must not add a leading line, or every source-map line would shift by one.
         let code = match input.format {
             Format::Esm => code,
             Format::Iife => format!("(()=>{{{code}}})();\n"),
         };
-        Ok((code, map))
+        Ok((code, map, diagnostics))
     })
 }

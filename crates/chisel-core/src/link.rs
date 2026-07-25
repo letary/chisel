@@ -20,7 +20,8 @@
 use std::collections::{HashMap, HashSet};
 
 use swc_core::atoms::Atom;
-use swc_core::common::{SyntaxContext, DUMMY_SP};
+use swc_core::common::sync::Lrc;
+use swc_core::common::{SourceMap, SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::transforms::base::hygiene::hygiene;
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -413,7 +414,15 @@ fn prop_name_is_pure(k: &PropName) -> bool {
 
 // ---- the linker --------------------------------------------------------------------------------
 
-pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse: bool, keep: &[String]) -> anyhow::Result<Module> {
+pub fn link(
+    graph: &mut ModuleGraph,
+    entry_id: usize,
+    inject_ids: &[usize],
+    fuse: bool,
+    keep: &[String],
+    cm: &Lrc<SourceMap>,
+    diagnostics: &mut Vec<String>,
+) -> anyhow::Result<Module> {
     let n = graph.modules.len();
 
     // --- SDK global map and per-module import maps (for Phase A). ---
@@ -487,6 +496,20 @@ pub fn link(graph: &mut ModuleGraph, entry_id: usize, inject_ids: &[usize], fuse
                 for i in 0..n {
                     crate::fusion::fuse_dates_module(&mut graph.modules[i].module, &ctx);
                 }
+            }
+        }
+    }
+
+    // --- particle curve chains (`curve()` / `colorCurve()`). Pure data assembly, so unlike the math
+    // fusers this pass also *validates*: a literal chain native would reject at set time becomes a
+    // build-time diagnostic. Validation runs always; the rewrite to a flat `_data` buffer only under
+    // `fuse` (and, like the other fusers, before DCE so a fully-fused bundle drops the builders). ---
+    {
+        let key_of = |name: &str| sdk_map.get(&Atom::from(name)).map(|t| (t.sym.clone(), t.ctxt));
+        let ctx = crate::curve::CurveCtx { curve: key_of("curve"), color_curve: key_of("colorCurve") };
+        if !ctx.is_empty() {
+            for i in 0..n {
+                crate::curve::fuse_curves_module(&mut graph.modules[i].module, &ctx, fuse, cm, diagnostics);
             }
         }
     }

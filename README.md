@@ -58,6 +58,30 @@ numbers are all f64 and the lowering never reassociates. On 100k-iteration loops
 allocations 43–57% with identical results. Fusion runs before DCE, so the inlined methods then
 disappear from the bundle too.
 
+### Curve chain fusion + validation (particle config)
+
+A third chain shape rides the same machinery, but for *data* rather than math: the LeCodes SDK's
+`curve()` / `colorCurve()` builders, whose entire state is the flat `Float32Array` the native particle
+bridge expects. A literal chain is fully known at compile time, so `curve(0.3).fade(0.15)` becomes
+`{ _data: new Float32Array([0,0.3,0.3,4,0,0,0,0.15,1,1,0.85,1,1,1,0,0]) }` — the same duck type the
+runtime builder presents through its `_data` getter — with hex colors parsed to floats at build time
+(the strings never ship, and the parser tree-shakes away).
+
+Because a builder is **mutable** (`.to()` returns `this`), a chain is only rewritten where its value
+is *immediately consumed*: a call argument, an object-literal property, the right side of a member
+assignment, plus the pass-throughs that forward a value to the same consumer (`??`, `?:`, parens). A
+chain bound to a variable is left as real calls, since `const c = curve(1)` … `c.to(0)` must keep
+working — and a chain that can't be lowered (non-literal stop `t`, computed color, unknown method) is
+left *whole*, never half-lowered into `{_data}.via(x, 2)`.
+
+The payoff is less about bytes than about **validation**: the same pass checks what the engine would
+otherwise only warn about on-device — stop `t` out of order or outside `0..1`, more than 8 stops,
+`.from()` after another stop, an unparsable color literal — and reports `path:line:col: message`
+through `Output.diagnostics`, leaving the chain alone so runtime behavior is unchanged. Validation
+runs regardless of `fuse`; only the rewrite is opt-in. `node scripts/curve-exact.mjs` bundles a
+44-case corpus twice (fusion on and off), runs both, and compares every float of every buffer the two
+produce.
+
 ## Use
 
 Build from source, or install the prebuilt binary from npm (resolves your platform automatically via
@@ -87,8 +111,12 @@ assets, sourcemap, keep }`. Output: `{ code, map?, diagnostics, error? }`.
   detection needs before an entry is known. `entry` is not required in this mode; per-file parse
   failures land in that file's `error` field instead of failing the scan.
 
+- `diagnostics` — non-fatal build-time findings, `path:line:col: message` (today: particle curve
+  chains the engine would reject; reported whether or not `fuse` is set).
+
 Helpers: `node scripts/run.mjs <file|dir>` runs a quick bundle; `node scripts/robustness.mjs` runs a
-broad JS/TS syntax corpus through the binary and checks each survives.
+broad JS/TS syntax corpus through the binary and checks each survives;
+`node scripts/curve-exact.mjs` checks curve fusion against the real builders, buffer for buffer.
 
 ## How it works
 
@@ -121,7 +149,8 @@ parse (SWC, owned AST) → module graph (resolve + TS-strip) → Phase A: unify 
 
 ## Tests
 
-`cargo test` covers strip/codegen, the linker, static & instance method DCE, fusion, user-code
-tree-shaking, `define`/default-export handling, and source maps. `node scripts/robustness.mjs` runs a
-broad syntax corpus (destructuring, private fields, generators, enums, namespaces, …) through the
-binary, readable and minified, and executes each.
+`cargo test` covers strip/codegen, the linker, static & instance method DCE, fusion (math, date, and
+curve payloads + diagnostics), user-code tree-shaking, `define`/default-export handling, and source
+maps. `node scripts/robustness.mjs` runs a broad syntax corpus (destructuring, private fields,
+generators, enums, namespaces, …) through the binary, readable and minified, and executes each;
+`node scripts/curve-exact.mjs` proves fused curve payloads are bit-identical to the builders'.
