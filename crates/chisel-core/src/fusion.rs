@@ -241,7 +241,7 @@ fn as_method_call(call: &CallExpr) -> Option<(&Expr, String, &[ExprOrSpread])> {
 }
 
 /// Side-effect-free and cheap to duplicate.
-fn is_simple(e: &Expr) -> bool {
+pub(crate) fn is_simple(e: &Expr) -> bool {
     match e {
         Expr::Lit(_) | Expr::Ident(_) | Expr::This(_) => true,
         Expr::Paren(p) => is_simple(&p.expr),
@@ -256,11 +256,11 @@ fn is_simple(e: &Expr) -> bool {
 
 // ---- AST constructors --------------------------------------------------------------------------
 
-fn num(v: f64) -> Expr {
+pub(crate) fn num(v: f64) -> Expr {
     Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value: v, raw: None }))
 }
 
-fn paren(e: Expr) -> Expr {
+pub(crate) fn paren(e: Expr) -> Expr {
     match e {
         Expr::Bin(_) | Expr::Unary(_) | Expr::Cond(_) | Expr::Assign(_) | Expr::Seq(_) => {
             Expr::Paren(ParenExpr { span: DUMMY_SP, expr: Box::new(e) })
@@ -291,7 +291,7 @@ fn norm_comp(c: Expr, l: &Expr) -> Expr {
     })
 }
 
-fn plain_ident(name: &str) -> Ident {
+pub(crate) fn plain_ident(name: &str) -> Ident {
     Ident::new(Atom::from(name), DUMMY_SP, SyntaxContext::empty())
 }
 
@@ -674,11 +674,11 @@ pub fn fuse_dates_module(module: &mut Module, ctx: &DateCtx) -> usize {
 
 // ---- extra AST constructors for date lowering --------------------------------------------------
 
-fn nth(args: &[ExprOrSpread], i: usize) -> Option<Expr> {
+pub(crate) fn nth(args: &[ExprOrSpread], i: usize) -> Option<Expr> {
     args.get(i).filter(|a| a.spread.is_none()).map(|a| (*a.expr).clone())
 }
 
-fn str_lit_of(e: &Expr) -> Option<String> {
+pub(crate) fn str_lit_of(e: &Expr) -> Option<String> {
     match e {
         Expr::Lit(Lit::Str(s)) => s.value.as_str().map(|x| x.to_string()),
         Expr::Paren(p) => str_lit_of(&p.expr),
@@ -686,7 +686,7 @@ fn str_lit_of(e: &Expr) -> Option<String> {
     }
 }
 
-fn str_lit(s: &str) -> Expr {
+pub(crate) fn str_lit(s: &str) -> Expr {
     Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: Atom::from(s).into(), raw: None }))
 }
 

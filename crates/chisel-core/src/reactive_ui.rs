@@ -9,12 +9,13 @@
 //!    so unchanged items keep their element identity across binding re-runs and the runtime
 //!    reconciler leaves them mounted. The slot string only needs to be unique within a bundle.
 //!
-//! 2. **Auto-wrapped reactive expressions.** A `UIText` text argument, or a top-level style-object
-//!    property value (factory style arg or `.style({...})` call), that reads `.value` of a
-//!    signal-typed binding is wrapped in `() => expr`, turning it into a reactive binding. The SDK
-//!    APIs accept both forms, so the wrap is type- and behavior-transparent for non-reactive code.
-//!    Signal-typed bindings are found by a fixpoint rooted at free calls to `signal(…)` /
-//!    `computed(…)` (mirroring fusion's Vec3 local inference).
+//! 2. **Auto-wrapped reactive expressions.** A `UIText` text argument, or a top-level object
+//!    property value in a binding-accepting call (factory style arg, `.style({...})`, or the
+//!    style-class batch form `.class({...})`), that reads `.value` of a signal-typed binding is
+//!    wrapped in `() => expr`, turning it into a reactive binding. The SDK APIs accept both forms,
+//!    so the wrap is type- and behavior-transparent for non-reactive code. Signal-typed bindings
+//!    are found by a fixpoint rooted at free calls to `signal(…)` / `computed(…)` (mirroring
+//!    fusion's Vec3 local inference).
 //!
 //! Both rewrites are safe to over-apply: `__uiMap` degrades to `Array.prototype.map` outside a
 //! children binding / for non-element results, and a wrapped expression that never re-reads a
@@ -256,7 +257,7 @@ impl VisitMut for ReactiveUi<'_> {
                 return;
             }
 
-            // Member calls the pass understands: x.setContent(fn) and x.style({...}).
+            // Member calls the pass understands: x.setContent(fn), x.style({...}) and x.class({...}).
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(m) = &**callee {
                     if let MemberProp::Ident(p) = &m.prop {
@@ -272,7 +273,9 @@ impl VisitMut for ReactiveUi<'_> {
                             self.in_children_fn -= 1;
                             return;
                         }
-                        if p.sym == "style" && call.args.len() == 1 && call.args[0].spread.is_none() {
+                        // `.class({...})` values are boolean | () => boolean — the same wrap rule
+                        // as style values applies (the el.class proxy accepts both forms).
+                        if (p.sym == "style" || p.sym == "class") && call.args.len() == 1 && call.args[0].spread.is_none() {
                             call.visit_mut_children_with(self);
                             if let Expr::Object(obj) = &mut *call.args[0].expr {
                                 self.wrap_style_object(obj);
