@@ -11,6 +11,7 @@ use swc_core::common::{Globals, GLOBALS};
 
 pub mod curve;
 pub mod emit;
+pub mod flatten_ui;
 pub mod fusion;
 pub mod graph;
 pub mod link;
@@ -78,6 +79,12 @@ pub struct Input {
     /// injected globals, so it only ever fires in user code. Off by default.
     #[serde(default)]
     pub reactive_ui: bool,
+    /// Flatten literal array arguments of UI factory calls into variadic arguments
+    /// (`UIColumn([a, b])` → `UIColumn(a, b)`) — the runtime flattens array arguments one level
+    /// anyway, so this saves an array allocation per call site. Requires an SDK with variadic
+    /// factory dispatch (`buildUI`). Off by default.
+    #[serde(default)]
+    pub flatten_ui: bool,
 }
 
 /// Bundler output. `error` is `Some` on a hard failure (and `code` is empty).
@@ -126,7 +133,7 @@ fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>, Vec<St
         let mut entries = vec![input.entry.clone()];
         entries.extend(input.inject.iter().cloned());
 
-        let mut g = graph::build(&cm, &input.files, &entries, &input.assets, &input.define, input.reactive_ui)?;
+        let mut g = graph::build(&cm, &input.files, &entries, &input.assets, &input.define, input.reactive_ui, input.flatten_ui)?;
         let entry_id = g.path_to_id[&input.entry];
         let inject_ids: Vec<usize> = input.inject.iter().map(|p| g.path_to_id[p]).collect();
 

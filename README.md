@@ -97,7 +97,7 @@ echo '{"files":{"/main.ts":"..."},"entry":"/main.ts","inject":["/inject.ts"],"mi
 ```
 
 Input: `{ files: {path→source}, entry, inject: [paths], format: "esm"|"iife", minify, fuse, define,
-assets, sourcemap, keep }`. Output: `{ code, map?, diagnostics, error? }`.
+assets, sourcemap, keep, reactive_ui, flatten_ui }`. Output: `{ code, map?, diagnostics, error? }`.
 
 - `inject` — every export of these entries becomes an ambient global (esbuild `inject:` semantics).
 - `define` — compile-time global substitutions (numeric, e.g. `DEG2RAD` → `0.0174…`).
@@ -106,6 +106,22 @@ assets, sourcemap, keep }`. Output: `{ code, map?, diagnostics, error? }`.
 - `keep` — instance-method names the **host calls by name** (no in-bundle caller, so DCE can't see
   them). Kept on any *reached* class that defines them. An entry ending in `*` is a prefix, so
   `["_*"]` keeps every underscore-prefixed method.
+- `reactive_ui` — SDK signals desugaring: memoize `.map` inside children bindings (`__uiMap`) and
+  auto-wrap signal-reading text/style expressions in arrows. Keys on free references to the
+  injected globals, so SDK-internal code is inert. Off by default.
+- `flatten_ui` — two rewrites over UI factory calls. (1) Splice literal array arguments into
+  variadic arguments (`UIColumn([a, b])` → `UIColumn(a, b)`; the SDK runtime flattens array args
+  one level anyway — drops an array allocation per call site). Guards: spreads, holes, nested
+  array literals, function elements, and a leading object literal (the legacy style position) are
+  left alone. (2) Raw-lower calls whose arguments are all *provably* plain children — known
+  factory calls (incl. `.style()`/`.onClick()` builder chains), `const`s initialized from them
+  (fixpoint), falsy literals, `&&`/`?:` over those — to the SDK's dispatch-free builders:
+  `UIColumn(a, b)` → `__UIColumn([a, b])`, skipping the runtime style-probe + per-arg array scan
+  entirely (and letting the unused dispatch machinery tree-shake away). The reactive form lowers
+  too — a lone literal closure `UIColumn(() => […])` becomes `__UIColumn(() => […])` (the Element
+  constructor branches on `typeof`), composing with `reactive_ui`'s `__uiMap` memoization on the
+  same call. Anything unproven falls back to the normal call. Requires an SDK with variadic
+  factory dispatch + `__UI*` raw builders. Off by default.
 - `scan: true` — no bundling: parse every JS/TS module in `files` (`.d.ts` skipped) and return
   `Output.scan = { path: { imports: [resolved paths], hasExports } }` — the dependency facts entry
   detection needs before an entry is known. `entry` is not required in this mode; per-file parse
