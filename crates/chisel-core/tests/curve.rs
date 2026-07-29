@@ -28,7 +28,7 @@ fn build(main: &str, fuse: bool) -> Output {
         define: Default::default(),
         sourcemap: false,
         keep: vec!["_*".into()],
-        reactive_ui: false,
+        reactive_ui: false, flatten_ui: false,
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     out

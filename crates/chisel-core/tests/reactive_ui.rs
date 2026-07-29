@@ -30,7 +30,7 @@ fn run(main: &str, reactive_ui: bool) -> String {
         define: Default::default(),
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui,
+        reactive_ui, flatten_ui: false,
     });
     assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
     out.code
