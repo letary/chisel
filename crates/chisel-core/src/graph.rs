@@ -14,6 +14,7 @@ use swc_core::ecma::ast::*;
 use swc_core::ecma::transforms::base::resolver;
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 
+use crate::flatten_ui;
 use crate::parse;
 use crate::reactive_ui;
 use crate::resolve;
@@ -318,6 +319,7 @@ pub fn build(
     assets: &HashMap<String, String>,
     define: &HashMap<String, String>,
     reactive_ui: bool,
+    flatten_ui: bool,
 ) -> anyhow::Result<ModuleGraph> {
     let exists = |p: &str| files.contains_key(p);
     let define_exprs = parse_define(define);
@@ -369,6 +371,12 @@ pub fn build(
         // free (unresolved) references to the injected globals, so SDK modules are inert.
         if reactive_ui {
             reactive_ui::apply(&path, unresolved_ctxt, &mut module);
+        }
+        // Flatten literal array args of UI factory calls into variadic args (the runtime flattens
+        // array arguments one level either way; this saves an allocation per call site). Runs
+        // after reactive_ui so its position-based decisions see the original call shapes.
+        if flatten_ui {
+            flatten_ui::apply(unresolved_ctxt, &mut module);
         }
 
         let mut imports: Vec<(String, Vec<ImportSpec>)> = Vec::new();

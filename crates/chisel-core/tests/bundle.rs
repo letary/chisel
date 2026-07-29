@@ -7,7 +7,7 @@ use chisel_core::{bundle, Format, Input};
 /// Bundle a set of files. `entry` defaults to `/main.ts`.
 fn run(files: &[(&str, &str)], minify: bool) -> chisel_core::Output {
     let files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
-    bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false })
+    bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false })
 }
 
 fn ok(files: &[(&str, &str)]) -> String {
@@ -51,7 +51,7 @@ fn run_inject(files: &[(&str, &str)], inject: &[&str]) -> chisel_core::Output {
         assets: Default::default(),
         define: Default::default(),
         sourcemap: false,
-        keep: Default::default(), reactive_ui: false,
+        keep: Default::default(), reactive_ui: false, flatten_ui: false,
     })
 }
 
@@ -194,7 +194,7 @@ fn m4_fusion_inlines_chain_and_dces_methods() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     // The whole chain is a scalar terminal → fully inlined, no method calls, no Vec3 allocation.
@@ -219,7 +219,7 @@ fn m4_fusion_variable_rooted_chain() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     assert!(!c.contains(".add(") && !c.contains(".scale(") && !c.contains(".dot("), "chain on typed vars should fully fuse:\n{c}");
@@ -264,7 +264,7 @@ fn fuse_date_bundle(main: &str) -> String {
         define: Default::default(),
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui: false,
+        reactive_ui: false, flatten_ui: false,
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     out.code
@@ -321,7 +321,7 @@ fn m4_fusion_normalize_hoists_hypot_once() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     assert!(!c.contains(".normalize("), "normalize call should be fused:\n{c}");
@@ -398,7 +398,7 @@ fn m6_define_substitutes_free_global() {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<_, _>>();
     let define = [("DEG2RAD".to_string(), "0.017453292519943295".to_string())].into_iter().collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("0.017453292519943295"), "DEG2RAD must be substituted:\n{}", out.code);
     assert!(!out.code.contains("DEG2RAD"), "no free DEG2RAD should remain:\n{}", out.code);
@@ -412,7 +412,7 @@ fn m6_define_leaves_local_const_alone() {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<_, _>>();
     let define = [("DEG2RAD".to_string(), "0.017453292519943295".to_string())].into_iter().collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("Math.PI / 180"), "local const must survive untouched:\n{}", out.code);
 }
@@ -432,7 +432,7 @@ fn run_editor_define(files: &[(&str, &str)], value: &str) -> chisel_core::Output
         define,
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui: false,
+        reactive_ui: false, flatten_ui: false,
     })
 }
 
@@ -475,7 +475,7 @@ fn m6_boolean_define_leaves_local_binding_alone() {
     let files: &[(&str, &str)] = &[("/main.ts", "const EDITOR = compute()\nfunction compute(): boolean { return Math.random() > 0.5 }\nif (EDITOR) { console.log('maybe') }")];
     let files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
     let define = [("EDITOR".to_string(), "false".to_string())].into_iter().collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("if (EDITOR)"), "local EDITOR branch must survive:\n{}", out.code);
     assert!(out.code.contains("maybe"), "local EDITOR branch body must survive:\n{}", out.code);
@@ -530,7 +530,7 @@ fn m8_source_map_emitted_with_original_sources() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: true, keep: Default::default(), reactive_ui: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: true, keep: Default::default(), reactive_ui: false, flatten_ui: false });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let map = out.map.expect("source map should be present when requested");
     assert!(map.contains("\"version\":3") || map.contains("\"version\": 3"), "v3 source map:\n{map}");
@@ -573,7 +573,7 @@ fn m9_keep_retains_host_called_methods() {
         define: Default::default(),
         sourcemap: false,
         keep: vec!["_*".into()],
-        reactive_ui: false,
+        reactive_ui: false, flatten_ui: false,
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
@@ -605,7 +605,7 @@ fn m9_keep_exact_name() {
         define: Default::default(),
         sourcemap: false,
         keep: vec!["_emitTouchStart".into()],
-        reactive_ui: false,
+        reactive_ui: false, flatten_ui: false,
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("_emitTouchStart"), "exact-named keep method survives:\n{}", out.code);
@@ -615,7 +615,7 @@ fn m9_keep_exact_name() {
 #[test]
 fn m0_missing_entry_errors() {
     let files = [("/a.ts", "export const x = 1")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false });
     assert!(out.error.as_deref().unwrap_or_default().contains("Entrypoint not found"));
 }
 
