@@ -733,3 +733,41 @@ fn attach_works_for_a_class_anchor_and_keeps_user_side_effects_untouched() {
     );
     assert!(code.contains("CLASS_STATIC"), "class-anchored static dropped:\n{code}");
 }
+
+// ---- top-level await is a compile error (hosts eval the bundle as a plain script) -------------
+
+#[test]
+fn top_level_await_is_an_error_with_position() {
+    let out = run(&[("/main.ts", "const a = 1\nconst r = await fetch('x')\nconsole.log(a, r)")], false);
+    let err = out.error.expect("top-level await must fail the bundle");
+    assert!(err.starts_with("/main.ts:2:11: top-level await"), "unexpected message: {err}");
+    assert!(out.code.is_empty());
+}
+
+#[test]
+fn top_level_await_in_an_imported_module_is_an_error() {
+    let out = run(
+        &[
+            ("/main.ts", "import { v } from './cfg'\nconsole.log(v)"),
+            ("/cfg.ts", "export const v = await Promise.resolve(1)\n"),
+        ],
+        false,
+    );
+    let err = out.error.expect("top-level await in a dependency must fail the bundle");
+    assert!(err.starts_with("/cfg.ts:1:18: top-level await"), "unexpected message: {err}");
+}
+
+#[test]
+fn top_level_for_await_is_an_error() {
+    let out = run(&[("/main.ts", "for await (const x of [1]) console.log(x)")], false);
+    assert!(out.error.as_deref().unwrap_or("").starts_with("/main.ts:1:1: top-level await"), "{:?}", out.error);
+}
+
+#[test]
+fn await_inside_async_functions_still_bundles() {
+    let code = ok(&[(
+        "/main.ts",
+        "const main = async () => { const r = await Promise.resolve(1); for await (const x of [r]) console.log(x) }\nmain()",
+    )]);
+    assert!(code.contains("await"), "await inside the async body must survive:\n{code}");
+}

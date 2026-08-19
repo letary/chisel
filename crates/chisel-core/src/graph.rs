@@ -18,6 +18,7 @@ use crate::flatten_ui;
 use crate::parse;
 use crate::reactive_ui;
 use crate::resolve;
+use crate::tla;
 
 /// A specifier that imports a non-JS/TS file is an asset (`./hero.png`, `./model.glb`, `./font.ttf`).
 fn is_asset_specifier(spec: &str) -> bool {
@@ -348,6 +349,10 @@ pub fn build(
             .ok_or_else(|| anyhow::anyhow!("Module not found: {path}"))?;
 
         let mut module = parse::parse_module(cm, &path, src)?;
+        // Hosts eval the bundle as a plain script, so a module-scope `await` would only fail at
+        // load time (SyntaxError, whole app dead). Reject it here with a source position — before
+        // any transform, so the span is the user's.
+        tla::check_module(cm, &path, &module)?;
         let unresolved_mark = Mark::new();
         let top_level_mark = Mark::new();
         module.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, true));

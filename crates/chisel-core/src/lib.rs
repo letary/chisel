@@ -19,6 +19,7 @@ pub mod parse;
 pub mod reactive_ui;
 pub mod resolve;
 pub mod scan;
+pub mod tla;
 
 /// Output module format.
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
