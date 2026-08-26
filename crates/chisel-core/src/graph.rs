@@ -402,12 +402,18 @@ pub fn build(
                     }
                     let spec_str = as_str(&imp.src.value);
                     let resolved = resolve::resolve(&exists, &path, spec_str).ok();
-                    // An asset specifier with NO backing module (standalone / local testing) → a
-                    // compile-time URL constant. In production the asset is a real `export default
-                    // "<url>"` module (resolved below as a normal default import).
+                    // An asset specifier with NO backing module, but a URL in the caller's `assets`
+                    // map (standalone / local testing) → a compile-time URL constant. In production
+                    // the asset is a real `export default "<url>"` module (resolved below as a
+                    // normal default import). With NEITHER, the asset simply isn't there — that's
+                    // an error, not a fallback: baking the raw specifier in as a string produced a
+                    // reference nothing resolves at runtime, and no diagnostic anywhere.
                     if resolved.is_none() && is_asset_specifier(spec_str) {
                         if let [ImportSpecifier::Default(d)] = imp.specifiers.as_slice() {
-                            asset_consts.push((item_idx, d.local.sym.to_string(), asset_url(assets, spec_str)));
+                            let Some(url) = assets.get(spec_str) else {
+                                anyhow::bail!("{path}: asset not found: {spec_str}");
+                            };
+                            asset_consts.push((item_idx, d.local.sym.to_string(), url.clone()));
                             continue;
                         }
                     }
@@ -508,10 +514,19 @@ pub fn build(
             }
         }
 
-        // Rewrite asset default-imports in place: `import hero from './x.png'` → `const hero = "<url>"`.
-        for (idx, name, url) in asset_consts {
-            module.body[idx] = const_string_item(&name, &url, top_level_ctxt);
-        }
+        // Rewrite asset default-imports: `import hero from './x.png'` → `const hero = "<url>"`.
+        // HOISTED to the top of the body, not left where the import stood: an `import` binding is
+        // visible to the whole module wherever it sits, a `const` is not. A tool that appends its
+        // generated imports (the lecodes asset macro does, to keep source-map line numbers exact)
+        // would otherwise get a const declared *after* its own use — a TDZ ReferenceError at boot.
+        // A string const depends on nothing, so the front of the module is always a legal home.
+        let hoisted: Vec<ModuleItem> = asset_consts
+            .iter()
+            .map(|(idx, name, url)| {
+                module.body[*idx] = ModuleItem::Stmt(Stmt::Empty(EmptyStmt { span: DUMMY_SP }));
+                const_string_item(name, url, top_level_ctxt)
+            })
+            .collect();
 
         // Lower `export default <…>` items to plain top-level bindings.
         for idx in default_decls {
@@ -521,6 +536,11 @@ pub fn build(
                 ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(d)) => default_decl_to_item(d.decl, top_level_ctxt),
                 other => other, // unreachable, but keep the body intact
             };
+        }
+
+        // Both loops above address `module.body` by index, so the hoist lands only now.
+        if !hoisted.is_empty() {
+            module.body.splice(0..0, hoisted);
         }
 
         let id = modules.len();
