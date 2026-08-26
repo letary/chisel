@@ -7,7 +7,11 @@
 //! instance fields + static fields + superclass), one unit per *static method*, and one per
 //! *instance method*. Statics are pulled by `Class.name`; instance methods are pulled by *name
 //! presence* — a `.name(...)` access anywhere in reachable code (a computed `obj[x]` access keeps
-//! all instance methods, conservatively). So an unused `Mesh.sphere`, an unused `Vec3.reflect`, and
+//! all instance methods, conservatively). Two more things count as naming a member: a destructuring
+//! key (`const { velocity } = body` reads the getter) and an object-literal key that matches an
+//! instance *setter* somewhere (`Object.assign(inst, { friction })` / `node.aspect(Physics,
+//! { friction })` write through it — without this the accessor pair vanished and the write became
+//! a silent own property). So an unused `Mesh.sphere`, an unused `Vec3.reflect`, and
 //! everything only they pulled in all fall away. User modules get the *same* demand-driven DCE — an
 //! unused pure declaration / unused export is dropped, its own class members are method-DCE'd — with
 //! one difference: a **side-effecting** top-level statement in user code is a root (always kept and
@@ -110,6 +114,8 @@ enum Task {
 struct Collector<'a> {
     class_keys: &'a HashSet<Key>,
     binding_keys: &'a HashSet<Key>,
+    /// Every name that is an instance **setter** on some class (see `visit_prop`).
+    setter_names: &'a HashSet<Atom>,
     out: Vec<Edge>,
 }
 
@@ -189,6 +195,36 @@ impl Visit for Collector<'_> {
         }
         n.visit_children_with(self);
     }
+
+    /// An object-literal key is a write-by-name waiting to happen: `Object.assign(inst, { friction:
+    /// 0.02 })`, `node.aspect(Physics, { friction })`, `{ ...defaults, friction }` all reach a same-
+    /// named **setter** on whatever instance the object lands on. A plain method would merely be
+    /// overwritten by such a write, but a dropped setter turns it into a silent own data property —
+    /// so a literal key marks the name live iff some class declares an instance setter of that name.
+    /// (A computed key `{ [k]: v }` stays data access, like a computed read.)
+    fn visit_prop(&mut self, p: &Prop) {
+        if let Some(name) = prop_key_name(p) {
+            if self.setter_names.contains(&name) {
+                self.out.push(Edge::Instance(name));
+            }
+        }
+        p.visit_children_with(self);
+    }
+
+    /// Destructuring reads members by name exactly like `.name` does: `const { velocity } = body`
+    /// invokes the `velocity` getter, `const { spin: s } = wheel` reads the `spin` method.
+    fn visit_object_pat_prop(&mut self, p: &ObjectPatProp) {
+        match p {
+            ObjectPatProp::KeyValue(kv) => {
+                if let Some(name) = simple_prop_name(&kv.key) {
+                    self.out.push(Edge::Instance(name));
+                }
+            }
+            ObjectPatProp::Assign(a) => self.out.push(Edge::Instance(a.key.sym.clone())),
+            ObjectPatProp::Rest(_) => {}
+        }
+        p.visit_children_with(self);
+    }
 }
 
 fn visit_args(c: &mut Collector, args: &Option<Vec<ExprOrSpread>>) {
@@ -199,8 +235,13 @@ fn visit_args(c: &mut Collector, args: &Option<Vec<ExprOrSpread>>) {
     }
 }
 
-fn edges_of(node_visit: impl Fn(&mut Collector), class_keys: &HashSet<Key>, binding_keys: &HashSet<Key>) -> Vec<Edge> {
-    let mut c = Collector { class_keys, binding_keys, out: Vec::new() };
+fn edges_of(
+    node_visit: impl Fn(&mut Collector),
+    class_keys: &HashSet<Key>,
+    binding_keys: &HashSet<Key>,
+    setter_names: &HashSet<Atom>,
+) -> Vec<Edge> {
+    let mut c = Collector { class_keys, binding_keys, setter_names, out: Vec::new() };
     node_visit(&mut c);
     c.out
 }
@@ -210,6 +251,18 @@ fn simple_prop_name(p: &PropName) -> Option<Atom> {
         PropName::Ident(i) => Some(i.sym.clone()),
         PropName::Str(s) => Some(Atom::from(s.value.as_str().unwrap_or(""))),
         _ => None,
+    }
+}
+
+/// The literal (non-computed) key of an object-literal property, whatever its form.
+fn prop_key_name(p: &Prop) -> Option<Atom> {
+    match p {
+        Prop::Shorthand(id) => Some(id.sym.clone()),
+        Prop::Assign(a) => Some(a.key.sym.clone()),
+        Prop::KeyValue(kv) => simple_prop_name(&kv.key),
+        Prop::Getter(g) => simple_prop_name(&g.key),
+        Prop::Setter(s) => simple_prop_name(&s.key),
+        Prop::Method(m) => simple_prop_name(&m.key),
     }
 }
 
@@ -522,6 +575,8 @@ pub fn link(
     let mut class_statics: HashMap<Key, HashSet<Atom>> = HashMap::new();
     let mut class_instance: HashMap<Key, Vec<Atom>> = HashMap::new();
     let mut classes_with_instance: HashMap<Atom, Vec<Key>> = HashMap::new();
+    // Instance setter names across all classes — the only member kind an object-literal key can reach.
+    let mut setter_names: HashSet<Atom> = HashSet::new();
     for m in &graph.modules {
         let ctxt = m.top_level_ctxt;
         for item in &m.module.body {
@@ -538,9 +593,16 @@ pub fn link(
                         if let Some((name, is_static)) = method_name(mem) {
                             if is_static {
                                 statics.insert(name);
-                            } else if !instance.contains(&name) {
-                                instance.push(name.clone());
-                                classes_with_instance.entry(name).or_default().push(key.clone());
+                            } else {
+                                if let ClassMember::Method(mm) = mem {
+                                    if mm.kind == MethodKind::Setter {
+                                        setter_names.insert(name.clone());
+                                    }
+                                }
+                                if !instance.contains(&name) {
+                                    instance.push(name.clone());
+                                    classes_with_instance.entry(name).or_default().push(key.clone());
+                                }
                             }
                         }
                     }
@@ -564,12 +626,12 @@ pub fn link(
                 ItemKind::Drop => continue,
                 // A user side effect must run → its references are reachability roots.
                 ItemKind::SideEffect => {
-                    roots.extend(edges_of(|c| item.visit_with(c), &class_keys, &binding_keys));
+                    roots.extend(edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names));
                 }
                 // Not a root: it only runs if its anchor survives, so its refs are held back until
                 // then — otherwise attaching a statement would drag its whole reference set in.
                 ItemKind::AttachedTo(anchor) => {
-                    let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys);
+                    let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names);
                     pending.entry(anchor).or_default().extend(e);
                 }
                 // A pure decl becomes unit(s); its references are pulled only if the unit is reached.
@@ -578,13 +640,13 @@ pub fn link(
                         let key = (cd.ident.sym.clone(), ctxt);
                         let mut core = Vec::new();
                         if let Some(sc) = &cd.class.super_class {
-                            core.extend(edges_of(|c| sc.visit_with(c), &class_keys, &binding_keys));
+                            core.extend(edges_of(|c| sc.visit_with(c), &class_keys, &binding_keys, &setter_names));
                         }
                         for mem in &cd.class.body {
                             match method_name(mem) {
                                 Some((name, is_static)) => {
                                     if let ClassMember::Method(mm) = mem {
-                                        let e = edges_of(|c| mm.function.visit_with(c), &class_keys, &binding_keys);
+                                        let e = edges_of(|c| mm.function.visit_with(c), &class_keys, &binding_keys, &setter_names);
                                         let unit = if is_static {
                                             Unit::Static(key.clone(), name)
                                         } else {
@@ -593,13 +655,13 @@ pub fn link(
                                         unit_edges.entry(unit).or_default().extend(e);
                                     }
                                 }
-                                None => core.extend(edges_of(|c| mem.visit_with(c), &class_keys, &binding_keys)),
+                                None => core.extend(edges_of(|c| mem.visit_with(c), &class_keys, &binding_keys, &setter_names)),
                             }
                         }
                         unit_edges.entry(Unit::Core(key)).or_default().extend(core);
                     }
                     Some(d) => {
-                        let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys);
+                        let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names);
                         for k in binding_keys_of_decl(d, ctxt) {
                             unit_edges.entry(Unit::Decl(k)).or_default().extend(e.clone());
                         }

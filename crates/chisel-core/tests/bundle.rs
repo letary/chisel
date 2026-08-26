@@ -771,3 +771,51 @@ fn await_inside_async_functions_still_bundles() {
     )]);
     assert!(code.contains("await"), "await inside the async body must survive:\n{code}");
 }
+
+// ---- M10: members named by object-literal keys / destructuring ----------------------------------
+
+#[test]
+fn m10_object_literal_key_keeps_setter() {
+    // `Object.assign(inst, { friction })` reaches the `friction` setter by name with no `.friction`
+    // member read anywhere in the bundle. The accessor pair must survive (keyed or shorthand); a
+    // same-named key does NOT resurrect a plain method (a write would overwrite it anyway), and an
+    // unrelated method still drops.
+    let code = ok_inject(
+        &[
+            (
+                "/main.ts",
+                "const b = new Body()\nconst mass = 2\nconfigure(b, { friction: 0.02, mass, spin: 1 })\nconsole.log(b, { dead: 1 })",
+            ),
+            ("/sdk/inject.ts", "export { Body, configure } from './body'"),
+            (
+                "/sdk/body.ts",
+                "export class Body {\n  _f = 0.6\n  _m = 1\n  get friction(): number { return this._f }\n  set friction(v: number) { this._f = v }\n  set mass(v: number) { this._m = v }\n  spin(): number { return 1 }\n  dead(): number { return 2 }\n}\nexport function configure(inst: object, opts: object): void { Object.assign(inst, opts) }",
+            ),
+        ],
+        &["/sdk/inject.ts"],
+    );
+    assert!(code.contains("set friction"), "literal key must keep the setter:\n{code}");
+    assert!(code.contains("get friction"), "…and its getter half:\n{code}");
+    assert!(code.contains("set mass"), "shorthand key must keep the setter too:\n{code}");
+    assert!(!code.contains("spin()"), "a literal key is not a call — a plain method is still dropped:\n{code}");
+    assert!(!code.contains("dead()"), "unrelated method dropped:\n{code}");
+}
+
+#[test]
+fn m10_destructuring_reads_members_by_name() {
+    let code = ok_inject(
+        &[
+            ("/main.ts", "const b = new Body()\nconst { velocity, spin: s, mass = 1 } = b\nconsole.log(velocity, s, mass)"),
+            ("/sdk/inject.ts", "export { Body } from './body'"),
+            (
+                "/sdk/body.ts",
+                "export class Body {\n  get velocity(): number { return 1 }\n  get mass(): number { return 4 }\n  spin(): number { return 2 }\n  dead(): number { return 3 }\n}",
+            ),
+        ],
+        &["/sdk/inject.ts"],
+    );
+    assert!(code.contains("get velocity"), "destructured getter kept:\n{code}");
+    assert!(code.contains("get mass"), "destructured-with-default getter kept:\n{code}");
+    assert!(code.contains("spin()"), "destructured (renamed) method kept:\n{code}");
+    assert!(!code.contains("dead()"), "unrelated method dropped:\n{code}");
+}
