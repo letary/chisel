@@ -495,6 +495,32 @@ fn m6_default_export_import_resolves_url() {
 }
 
 #[test]
+fn m6_missing_asset_is_an_error() {
+    // No backing module and no `assets` mapping: the asset isn't there. It used to compile to
+    // `const logo = "./logo.png"` — a relative source path nothing resolves at runtime.
+    let out = run(&[("/main.ts", "import logo from './logo.png'\nconsole.log(logo)")], false);
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("asset not found: ./logo.png"), "missing asset must be reported: {err}");
+}
+
+#[test]
+fn m6_mapped_asset_const_is_hoisted() {
+    // The asset macro APPENDS its generated imports (so source-map lines stay exact), so the
+    // import can sit after every use of its binding. As a `const` that's a TDZ ReferenceError
+    // unless the declaration is hoisted to the top of the module.
+    let mut assets = HashMap::new();
+    assets.insert("./logo.png".to_string(), "https://cdn.example/logo.png".to_string());
+    let files = [("/main.ts", "console.log(logo)\nimport logo from './logo.png'")]
+        .iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets, define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false });
+    assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
+    let code = out.code;
+    let decl = code.find("https://cdn.example/logo.png").expect("asset const missing");
+    let used = code.find("console.log").expect("use missing");
+    assert!(decl < used, "asset const must be declared before its use:\n{code}");
+}
+
+#[test]
 fn m6_default_export_keeps_runtime_expr() {
     // Shaders are `export default \`…${_creator.backend}…\`` — a runtime template, not a static URL.
     let code = ok(&[
