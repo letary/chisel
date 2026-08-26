@@ -503,6 +503,18 @@ pub fn link(
         })
         .collect();
 
+    // --- component writes on SDK-owned vectors (`c.velocity.y = 7` → `__compWrite(c, …)`), before
+    // Phase A so the helper references resolve like any other injected global. Off unless the SDK
+    // exports both helpers, so an older SDK bundles exactly as before. ---
+    let comp_live: HashSet<Atom> = if [crate::comp_write::WRITE_HELPER, crate::comp_write::OP_HELPER]
+        .iter()
+        .all(|h| sdk_map.contains_key(&Atom::from(*h)))
+    {
+        crate::comp_write::apply(graph, diagnostics)
+    } else {
+        HashSet::new()
+    };
+
     // --- Phase A. ---
     for i in 0..n {
         let top_ctxt = graph.modules[i].top_level_ctxt;
@@ -694,6 +706,11 @@ pub fn link(
             }
             None => work.push(Task::Live(Atom::from(pat.as_str()))),
         }
+    }
+    // Getters the comp_write pass rewrote out of user code: the helper's fallback reads them by a
+    // computed key, which DCE cannot see, so they stay live by name.
+    for name in &comp_live {
+        work.push(Task::Live(name.clone()));
     }
     while let Some(t) = work.pop() {
         match t {

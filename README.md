@@ -144,6 +144,16 @@ parse (SWC, owned AST) → module graph (resolve + TS-strip) → Phase A: unify 
   → Phase D: hygiene → [minify: SWC compress + top-level mangle] → emit (+ source map)
 ```
 
+- **Component writes on SDK-owned vectors** (`comp_write.rs`): `hero.controller.velocity.y = 7` is,
+  as written, a write to the throwaway copy the `velocity` getter returns. The pass rewrites the exact
+  `<owner>.<prop>.<x|y|z|w> = v` shape (also `+= -= *= /=`, statement `++`/`--`) into
+  `__compWrite(owner, "velocity", "y", 7)` / `__compOp(owner, …, op, v)` — SDK helpers that ask the
+  owner's `_writeComp(prop, axis, v)` to apply the write (no getter, no allocation) and fall back to
+  the plain write on anything without the hook, so a user record behaves as spelled. Which names
+  qualify is compile-time data on the owner class — `static _comps = ["velocity"]`, read and then
+  stripped from the bundle (a hook without the list is a diagnostic); only the direct spelling is
+  covered (a stored copy stays a copy); off when the SDK does not export the helpers; rewritten
+  getters stay live.
 - **Identity unification** rewrites each `import`-local and injected global to its origin binding's
   `(name, SyntaxContext)`, so all references to a logical binding share one identity.
 - **Member-aware reachability** splits each class into a *core* unit, one unit per *static method*, and

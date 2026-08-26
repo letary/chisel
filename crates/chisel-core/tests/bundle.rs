@@ -819,3 +819,67 @@ fn m10_destructuring_reads_members_by_name() {
     assert!(code.contains("spin()"), "destructured (renamed) method kept:\n{code}");
     assert!(!code.contains("dead()"), "unrelated method dropped:\n{code}");
 }
+
+// ---- M11: component writes on SDK-owned vectors ---------------------------------------------------
+
+const COMP_SDK: &str = "export class Ctl {\n  _id = 1\n  static _comps = [\"velocity\"]\n  get velocity(): number[] { return [1, 2, 3] }\n  get grounded(): boolean { return true }\n  _writeComp(prop: string, axis: string, v: number): void { console.log(prop, axis, v) }\n  dead(): number { return 0 }\n}\nexport const __compWrite = (o: any, p: string, a: string, v: number): number => { const f = o._writeComp; if (f !== undefined) f.call(o, p, a, v); else o[p][a] = v; return v }\nexport const __compOp = (o: any, p: string, a: string, op: number, v: number): number => { const c = o[p][a]; return __compWrite(o, p, a, op === 0 ? c + v : c - v) }";
+
+#[test]
+fn m11_component_write_lowers_to_owner_helper() {
+    // `c.velocity.y = 7` → `__compWrite(c, "velocity", "y", 7)`; compound ops and statement `++` go to
+    // `__compOp`; the getter survives (nothing references `.velocity` by name any more, but the
+    // helper's fallback does); a component write on any UNLISTED name — a user record's, or another
+    // getter of the same class — is untouched; the `static _comps` list itself never ships.
+    let code = ok_inject(
+        &[
+            (
+                "/main.ts",
+                "const c = new Ctl()\nc.velocity.y = 7\nc.velocity.x += 3\nc.velocity.z++\nconst rec = { pos: { x: 0 } }\nrec.pos.x = 1\nc.grounded.x = 1\nconst old = c.velocity.y++\nconsole.log(c, rec, old)",
+            ),
+            ("/sdk/inject.ts", "export { Ctl, __compWrite, __compOp } from './ctl'"),
+            ("/sdk/ctl.ts", COMP_SDK),
+        ],
+        &["/sdk/inject.ts"],
+    );
+    assert!(code.contains("__compWrite(c, \"velocity\", \"y\", 7)"), "plain write lowered:\n{code}");
+    assert!(code.contains("__compOp(c, \"velocity\", \"x\", 0, 3)"), "`+=` lowered:\n{code}");
+    assert!(code.contains("__compOp(c, \"velocity\", \"z\", 0, 1)"), "statement `++` lowered:\n{code}");
+    assert!(code.contains("c.velocity.y++"), "postfix `++` used as a value keeps its old-value semantics:\n{code}");
+    assert!(code.contains("rec.pos.x = 1"), "non-owner property name untouched:\n{code}");
+    assert!(code.contains("c.grounded.x = 1"), "unlisted getter of the owner class untouched:\n{code}");
+    assert!(code.contains("get velocity"), "rewritten getter kept for the fallback path:\n{code}");
+    assert!(code.contains("_writeComp"), "owner hook kept:\n{code}");
+    assert!(!code.contains("_comps"), "the compile-time list is stripped from the bundle:\n{code}");
+    assert!(!code.contains("dead()"), "DCE still active:\n{code}");
+}
+
+#[test]
+fn m11_hook_without_list_is_a_diagnostic() {
+    // A class that declares `_writeComp` but no `static _comps` routes nothing and says so.
+    let sdk = COMP_SDK.replace("  static _comps = [\"velocity\"]\n", "");
+    let out = run_inject(
+        &[
+            ("/main.ts", "const c = new Ctl()\nc.velocity.y = 7\nconsole.log(c)"),
+            ("/sdk/inject.ts", "export { Ctl, __compWrite, __compOp } from './ctl'"),
+            ("/sdk/ctl.ts", sdk.as_str()),
+        ],
+        &["/sdk/inject.ts"],
+    );
+    assert!(out.error.is_none(), "error: {:?}", out.error);
+    assert!(out.diagnostics.iter().any(|d| d.contains("Ctl") && d.contains("_comps")), "diagnostic expected: {:?}", out.diagnostics);
+    assert!(out.code.contains("c.velocity.y = 7"), "nothing routed without the list:\n{}", out.code);
+}
+
+#[test]
+fn m11_component_write_is_off_without_sdk_helpers() {
+    let code = ok_inject(
+        &[
+            ("/main.ts", "const c = new Ctl()\nc.velocity.y = 7\nconsole.log(c)"),
+            ("/sdk/inject.ts", "export { Ctl } from './ctl'"),
+            ("/sdk/ctl.ts", COMP_SDK),
+        ],
+        &["/sdk/inject.ts"],
+    );
+    assert!(code.contains("c.velocity.y = 7"), "older SDK: bundled exactly as written:\n{code}");
+    assert!(!code.contains("__compWrite("), "no dangling helper reference:\n{code}");
+}
