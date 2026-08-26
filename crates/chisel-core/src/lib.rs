@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use swc_core::common::{Globals, GLOBALS};
 
+pub mod comp_write;
 pub mod curve;
 pub mod emit;
 pub mod flatten_ui;
