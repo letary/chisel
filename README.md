@@ -105,7 +105,9 @@ assets, sourcemap, keep, reactive_ui, flatten_ui }`. Output: `{ code, map?, diag
 - `sourcemap` — emit a v3 map in `Output.map` (`sources` are the original module paths).
 - `keep` — instance-method names the **host calls by name** (no in-bundle caller, so DCE can't see
   them). Kept on any *reached* class that defines them. An entry ending in `*` is a prefix, so
-  `["_*"]` keeps every underscore-prefixed method.
+  `["_*"]` keeps every underscore-prefixed method. Not needed for accessors written through a
+  config object (`Object.assign(inst, { friction })`): an object-literal key that matches an
+  instance setter keeps that accessor pair on its own.
 - `reactive_ui` — SDK signals desugaring: memoize `.map` inside children bindings (`__uiMap`) and
   auto-wrap signal-reading text/style expressions in arrows. Keys on free references to the
   injected globals, so SDK-internal code is inert. Off by default.
@@ -147,7 +149,10 @@ parse (SWC, owned AST) → module graph (resolve + TS-strip) → Phase A: unify 
 - **Member-aware reachability** splits each class into a *core* unit, one unit per *static method*, and
   one per *instance method*. Statics are pulled by `Class.name`; instance methods by name presence
   (`.name(...)` anywhere reachable; a dynamic `obj[expr]` call keeps all — a numeric index `v[0]` does
-  not). The same pass shakes user modules: unused pure decls / exports are dropped and user classes are
+  not). Destructuring keys count as reads (`const { velocity } = body` keeps the getter), and an
+  object-literal key that matches an instance *setter* counts as a write (`Object.assign(inst,
+  { friction: 0.02 })` keeps the `friction` accessor pair — a computed key `{ [k]: v }` does not).
+  The same pass shakes user modules: unused pure decls / exports are dropped and user classes are
   method-DCE'd, while side-effecting top-level statements and `import './setup'` side-effect imports are
   kept; injected SDK modules are pulled purely on demand. One exception keeps the `sideEffects: false`
   contract honest: an SDK top-level statement that *mutates a binding that module declares*
