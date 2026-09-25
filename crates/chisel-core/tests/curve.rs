@@ -8,11 +8,19 @@ use chisel_core::{bundle, Format, Input, Output};
 
 const CURVE_SDK: &str = include_str!("../../../fixtures/curve-sdk/curve.ts");
 const CURVE_INJECT: &str = include_str!("../../../fixtures/curve-sdk/inject.ts");
+const COLOR_SDK: &str = include_str!("../../../fixtures/curve-sdk/color.ts");
+const CSS_COLOR_SDK: &str = include_str!("../../../fixtures/curve-sdk/cssColor.ts");
 
 /// Bundle `main` with the curve SDK injected. `keep: ["_*"]` mirrors lecodes-cli (the `_data` getter
 /// is read by the host, so nothing in the bundle references it).
 fn build(main: &str, fuse: bool) -> Output {
-    let files = [("/main.ts", main), ("/__sdk/inject.ts", CURVE_INJECT), ("/__sdk/curve.ts", CURVE_SDK)]
+    let files = [
+        ("/main.ts", main),
+        ("/__sdk/inject.ts", CURVE_INJECT),
+        ("/__sdk/curve.ts", CURVE_SDK),
+        ("/__sdk/color.ts", COLOR_SDK),
+        ("/__sdk/cssColor.ts", CSS_COLOR_SDK),
+    ]
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<_, _>>();
@@ -76,16 +84,44 @@ fn ranges_split_into_the_lo_hi_slots() {
 
 #[test]
 fn color_literals_are_parsed_at_compile_time() {
-    // The hex strings never reach the bundle, and neither does the parser.
+    // The hex strings never reach the bundle, and neither does the SDK's color parser (here the
+    // chain was its only user; in an app the UI keeps it).
     let out = build("sink(colorCurve('#ff8000').to('#000000'))", true);
     assert!(!out.code.contains("#ff8000"), "hex literal should be gone:\n{}", out.code);
-    assert!(!out.code.contains("parseHexString") && !out.code.contains("class ColorCurveBuilder"), "color parser should be DCE'd:\n{}", out.code);
-    // [baseLo rgba, baseHi rgba, n, (t, lo rgba, hi rgba) × n]: #ff8000 → 1, 128/255, 0, 1 in both
-    // base slots, then the implicit white start stop and opaque black at death.
+    assert!(!out.code.contains("parseCssColor") && !out.code.contains("class ColorCurveBuilder"), "color parser should be DCE'd:\n{}", out.code);
+    // [baseLo rgba, baseHi rgba, n, (t, lo rgba, hi rgba) × n]: #ff8000 → 1, 128/255 (as the
+    // float32 the SDK computes), 0, 1 in both base slots, then the implicit white start stop and
+    // opaque black at death.
     assert_eq!(
         payload(&out.code),
-        "1,0.5019607843137255,0,1,1,0.5019607843137255,0,1,2,0,1,1,1,1,1,1,1,1,1,0,0,0,1,0,0,0,1"
+        "1,0.501960813999176,0,1,1,0.501960813999176,0,1,2,0,1,1,1,1,1,1,1,1,1,0,0,0,1,0,0,0,1"
     );
+}
+
+#[test]
+fn css_colors_fold_like_the_sdk() {
+    // Every form `Color` accepts folds: a name, rgb() with a percentage alpha, hsl(). The floats are
+    // the AnyCanvas parser's float32s (the same the runtime and the SDK's TS twin compute).
+    let out = build("sink(colorCurve('red').to('rgb(0 0 0 / 50%)'))", true);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert_eq!(payload(&out.code), "1,0,0,1,1,0,0,1,2,0,1,1,1,1,1,1,1,1,1,0,0,0,0.5,0,0,0,0.5");
+    let hsl = build("sink(colorCurve('hsl(120 100% 50%)').from('transparent'))", true);
+    assert!(hsl.diagnostics.is_empty(), "{:?}", hsl.diagnostics);
+    assert_eq!(payload(&hsl.code), "0,1,0,1,0,1,0,1,1,0,0,0,0,0,0,0,0,0");
+}
+
+#[test]
+fn a_number_is_an_opaque_rgb_int() {
+    // What the SDK throws on — alpha packed into the number, a fraction, a negative — is a
+    // diagnostic here, and the chain is left to throw at runtime.
+    for src in ["sink(colorCurve(0xff000080).to('#000'))", "sink(colorCurve(1.5).to('#000'))", "sink(colorCurve(-1).to('#000'))"] {
+        let out = build(src, true);
+        assert!(out.diagnostics.iter().any(|d| d.contains("not a color")), "{src}: {:?}", out.diagnostics);
+        assert!(!out.code.contains("new Float32Array(["), "{src}: must not fuse:\n{}", out.code);
+    }
+    let ok = build("sink(colorCurve(0xff8000).to(0))", true);
+    assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+    assert_eq!(payload(&ok.code), "1,0.501960813999176,0,1,1,0.501960813999176,0,1,2,0,1,1,1,1,1,1,1,1,1,0,0,0,1,0,0,0,1");
 }
 
 #[test]

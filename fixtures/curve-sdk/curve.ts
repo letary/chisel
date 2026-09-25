@@ -1,42 +1,14 @@
-// The particle curve builders, VERBATIM from the LeCodes SDK (`packages/sdk/src/gl/Particles.ts`
-// plus the color parser from `packages/sdk/src/core/color.ts`) — minus the parts that talk to the
-// native bridge. This is the contract `chisel-core/src/curve.rs` mirrors op-for-op.
+// The particle curve builders, VERBATIM from the LeCodes SDK (`sdk/src/gl/Particles.ts`) — minus the
+// parts that talk to the native bridge — over the SDK's own `Color` (`color.ts` beside this file, with
+// its vendored AnyCanvas twin `cssColor.ts`). This is the contract `chisel-core/src/curve.rs` mirrors
+// op-for-op: the builders' method bodies here, the colors through the `anycanvas-css-color` crate.
 //
 // Used by `crates/chisel-core/tests/curve.rs` and `scripts/curve-exact.mjs` (which bundles the same
 // sources with fusion on and off and compares the resulting `_data` buffers element for element).
 
-export type ColorInput =
-  | string
-  | number
-  | readonly [number, number, number]
-  | readonly [number, number, number, number]
+import { Color, type ColorInput } from "./color"
 
 type Range<T> = T | { min: T, max: T }
-
-const parseHexString = (input: string): [number, number, number, number] => {
-  let s = input.trim()
-  if (s[0] === "#") s = s.slice(1)
-  if (s.length === 3 || s.length === 4) s = s.split("").map((c) => c + c).join("")
-  const int = parseInt(s, 16)
-  if (s.length === 8) return [ (int >>> 24) & 255, (int >> 16) & 255, (int >> 8) & 255, int & 255 ]
-  if (s.length === 6) return [ (int >> 16) & 255, (int >> 8) & 255, int & 255, 255 ]
-  return [ 0, 0, 0, 255 ]
-}
-
-const toFloats = (c: ColorInput): [number, number, number, number] => {
-  if (typeof c === "number") return [ ((c >> 16) & 255) / 255, ((c >> 8) & 255) / 255, (c & 255) / 255, 1 ]
-  if (typeof c === "string") {
-    const b = parseHexString(c)
-    return [ b[0] / 255, b[1] / 255, b[2] / 255, b[3] / 255 ]
-  }
-  return [ c[0], c[1], c[2], (c as readonly number[])[3] ?? 1 ]
-}
-
-export const Color = {
-  toRgba01(c: ColorInput): [number, number, number, number] {
-    return toFloats(c)
-  },
-}
 
 const isColorRange = (v: unknown): v is { min: ColorInput, max: ColorInput } =>
   typeof v === "object" && v !== null && !Array.isArray(v) && "min" in v

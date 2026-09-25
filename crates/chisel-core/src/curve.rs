@@ -10,8 +10,14 @@
 //! the native `setParticleSystemConfig` record expects. So a chain whose arguments are literals is
 //! *known at compile time*: this pass lowers it to `{ _data: new Float32Array([…]) }`, the same duck
 //! type the runtime builder presents, so the `Particles` setters have one consumption path either
-//! way. When every chain in a bundle fuses, the builder classes and the hex-color parser become
-//! unreferenced and the linker drops them (fusion runs before DCE, like the Vec3/date passes).
+//! way. When every chain in a bundle fuses, the builder classes become unreferenced and the linker
+//! drops them (fusion runs before DCE, like the Vec3/date passes).
+//!
+//! Color literals fold through the `anycanvas-css-color` crate: the Rust twin of AnyCanvas's
+//! `css_color.h`, which the runtime's engines parse with and the SDK's `Color` parses with through
+//! its TS twin — the three are held bit-equal by one golden corpus. So `colorCurve('red')`,
+//! `'rgb(0 0 0 / 50%)'` or `'hsl(210 50% 40%)'` land in the buffer as the float32s the builder would
+//! compute, and a string the SDK would throw on is a diagnostic here.
 //!
 //! Unlike Vec3/date fusion this is not about allocation — curves are cold config. The wins are
 //! (1) the bundle shipping the exact native buffer, and (2) **validation with file/line
@@ -29,6 +35,7 @@
 //!   left **entirely** as real calls — we never rewrite a *sub-chain*, or `curve(1).via(x, 2)` would
 //!   turn into `{_data}.via(x, 2)`.
 
+use anycanvas_css_color as css;
 use swc_core::atoms::Atom;
 use swc_core::common::sync::Lrc;
 use swc_core::common::{SourceMap, Span, Spanned, SyntaxContext, DUMMY_SP};
@@ -415,28 +422,34 @@ impl CurveFuser<'_> {
     }
 
     /// Parse a literal color to four 0..1 components — the compile-time twin of the SDK's
-    /// `Color.toRgba01` (`packages/sdk/src/core/color.ts`).
+    /// `Color.toRgba01` (`sdk/src/core/color.ts`): a CSS color string, a packed opaque 0xRRGGBB
+    /// integer, or 3 / 4 normalized components. The floats are the float32s the SDK produces (a
+    /// string through the AnyCanvas parser, a byte as `k / 255` in float32); the array components
+    /// pass through as-is, exactly as the runtime writes them.
     fn rgba(&mut self, e: &Expr, span: Span) -> Option<[f64; 4]> {
         match unparen(e) {
             Expr::Lit(Lit::Str(s)) => {
                 let raw = s.value.as_str()?;
-                match parse_hex(raw) {
-                    Some(c) => Some(c),
+                match css::parse(raw) {
+                    Some(c) => Some([c.r as f64, c.g as f64, c.b as f64, c.a as f64]),
                     None => {
-                        self.warn(span, "colorCurve", &format!("'{raw}' is not a color (#rgb / #rgba / #rrggbb / #rrggbbaa)"));
+                        self.warn(span, "colorCurve", &format!("'{raw}' is not a color (a CSS color: #rgb / #rrggbb / #rrggbbaa, rgb() / hsl(), a name)"));
                         None
                     }
                 }
             }
-            // A packed int, e.g. 0xff8800 — `((c >> 16) & 255) / 255`, …, alpha 1.
+            // A packed int, e.g. 0xff8800 — an opaque 0xRRGGBB. The SDK throws on anything else
+            // (a fraction, a negative, alpha packed above 0xFFFFFF).
             other if num_lit_of(other).is_some() => {
-                let v = to_int32(num_lit_of(other)?);
-                Some([
-                    (((v >> 16) & 255) as f64) / 255.0,
-                    (((v >> 8) & 255) as f64) / 255.0,
-                    ((v & 255) as f64) / 255.0,
-                    1.0,
-                ])
+                let v = num_lit_of(other)?;
+                if v.fract() != 0.0 || v < 0.0 || v > 0xFFFFFF as f64 {
+                    let shown = if v.fract() == 0.0 && v >= 0.0 { format!("0x{:x} ({v})", v as u64) } else { v.to_string() };
+                    self.warn(span, "colorCurve", &format!("{shown} is not a color — a number is an opaque 0xRRGGBB (an integer 0..0xFFFFFF); write alpha as '#rrggbbaa' or [r, g, b, a]"));
+                    return None;
+                }
+                let v = v as u32;
+                let byte = |b: u32| ((b & 255) as f32 / 255.0) as f64;
+                Some([byte(v >> 16), byte(v >> 8), byte(v), 1.0])
             }
             // Normalized components — passed through as-is by the runtime.
             Expr::Array(a) if (3..=4).contains(&a.elems.len()) => {
@@ -547,36 +560,6 @@ fn num_lit_of(e: &Expr) -> Option<f64> {
         },
         _ => None,
     }
-}
-
-/// `ToInt32` — what JS `>>` / `&` do to a number before shifting.
-fn to_int32(v: f64) -> i32 {
-    if !v.is_finite() {
-        return 0;
-    }
-    (v.trunc().rem_euclid(4294967296.0) as u32) as i32
-}
-
-/// `'#rgb' | '#rgba' | '#rrggbb' | '#rrggbbaa'` → four 0..1 components, exactly as the SDK's
-/// `parseHexString` does. `None` for anything else — the runtime silently falls back to black
-/// (or to `parseInt`'s prefix parse), which is the mistake worth catching at build time.
-fn parse_hex(input: &str) -> Option<[f64; 4]> {
-    let s = input.trim();
-    let s = s.strip_prefix('#').unwrap_or(s);
-    let s = match s.len() {
-        3 | 4 => s.chars().flat_map(|c| [c, c]).collect::<String>(),
-        _ => s.to_string(),
-    };
-    if !s.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let int = u32::from_str_radix(&s, 16).ok()?;
-    let b = match s.len() {
-        8 => [(int >> 24) & 255, (int >> 16) & 255, (int >> 8) & 255, int & 255],
-        6 => [(int >> 16) & 255, (int >> 8) & 255, int & 255, 255],
-        _ => return None,
-    };
-    Some([b[0] as f64 / 255.0, b[1] as f64 / 255.0, b[2] as f64 / 255.0, b[3] as f64 / 255.0])
 }
 
 // ---- output ------------------------------------------------------------------------------------
