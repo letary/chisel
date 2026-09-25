@@ -23,6 +23,8 @@ const showOnly = process.argv.includes("--show") ? process.argv[process.argv.ind
 const SDK = {
   "/__sdk/inject.ts": readFileSync(join(root, "fixtures/curve-sdk/inject.ts"), "utf8"),
   "/__sdk/curve.ts": readFileSync(join(root, "fixtures/curve-sdk/curve.ts"), "utf8"),
+  "/__sdk/color.ts": readFileSync(join(root, "fixtures/curve-sdk/color.ts"), "utf8"),
+  "/__sdk/cssColor.ts": readFileSync(join(root, "fixtures/curve-sdk/cssColor.ts"), "utf8"),
 }
 
 // Every case: source that pushes one or more curves through `sink`. `fusedAway` asserts the builder
@@ -52,6 +54,11 @@ const cases = [
   ["color-range", `sink(colorCurve({ min: '#f00', max: '#00f' }).to('#000'))`, { fusedAway: true }],
   ["color-default-base", `sink(colorCurve().to('#112233'))`, { fusedAway: true }],
   ["color-uppercase-hex", `sink(colorCurve('#FFAA33').to('#0F0'))`, { fusedAway: true }],
+  ["color-names", `sink(colorCurve('Red').via(0.5, 'rebeccapurple').to('transparent'))`, { fusedAway: true }],
+  ["color-rgb-fn", `sink(colorCurve('rgb(255, 128, 0)').to('rgba(0 0 0 / 50%)'))`, { fusedAway: true }],
+  ["color-rgb-percent", `sink(colorCurve('rgb(33.3%, 66.6%, 99.9%)').to('rgb(1e2, 2E1, 3e+1)'))`, { fusedAway: true }],
+  ["color-hsl", `sink(colorCurve('hsl(210 50% 40%)').via(0.3, 'hsla(0.5turn, 80%, 60%, 0.7)').to('hsl(-90deg 100% 50%)'))`, { fusedAway: true }],
+  ["color-clear-alias", `sink(colorCurve('clear').to('#fff'))`, { fusedAway: true }],
   // --- non-literal values: the `lohi` typeof test is inlined, so these still fuse ---
   ["var-number-base", `const s = 2.5\nsink(curve(s).to(0))`, { fusedAway: true }],
   ["var-range-base", `const r = { min: 1, max: 2 }\nsink(curve(r).to(0))`, { fusedAway: true }],
@@ -77,6 +84,10 @@ const cases = [
   ["invalid-t-range", `sink(curve(1).via(1.5, 1).to(0))`, { fusedAway: false, diag: "outside 0..1" }],
   ["invalid-nine-stops", `sink(curve(1).via(0.1,1).via(0.2,2).via(0.3,3).via(0.4,4).via(0.5,5).via(0.6,6).via(0.7,7).to(8))`, { fusedAway: false, diag: "at most 8" }],
   ["invalid-color", `sink(colorCurve('#nope!!').to('#000'))`, { fusedAway: false, diag: "not a color" }],
+  ["invalid-color-name", `sink(colorCurve('reddish').to('#000'))`, { fusedAway: false, diag: "not a color" }],
+  ["invalid-color-fn", `sink(colorCurve('hwb(0 0% 0%)').to('#000'))`, { fusedAway: false, diag: "not a color" }],
+  ["invalid-number-alpha", `sink(colorCurve(0xff000080).to('#000'))`, { fusedAway: false, diag: "not a color" }],
+  ["invalid-number-fraction", `sink(colorCurve(1.5).to('#000'))`, { fusedAway: false, diag: "not a color" }],
   ["invalid-mode", `sink(curve(1, 'plus').to(0))`, { fusedAway: false, diag: "unknown mode" }],
 ]
 
@@ -118,12 +129,21 @@ for (const [name, body, opts = {}] of cases) {
     } else if ((on.diagnostics ?? []).length) {
       throw new Error(`unexpected diagnostics: ${JSON.stringify(on.diagnostics)}`)
     }
-    const a = execute(on.code), b = execute(off.code)
-    if (a.length !== b.length || a.length === 0) throw new Error(`sink count ${a.length} vs ${b.length}`)
-    for (let i = 0; i < a.length; i++) {
-      if (a[i].length !== b[i].length) throw new Error(`buffer ${i} length ${a[i].length} vs ${b[i].length}`)
-      for (let k = 0; k < a[i].length; k++) {
-        if (!Object.is(a[i][k], b[i][k])) throw new Error(`buffer ${i}[${k}]: fused ${a[i][k]} !== builder ${b[i][k]}\n  fused:   [${a[i]}]\n  builder: [${b[i]}]`)
+    // A reported chain is left as real calls, so the runtime does exactly what it would have done
+    // without the pass — for a color the SDK throws on, that is throwing, with fusion on or off.
+    const attempt = (code) => { try { return { out: execute(code) } } catch (e) { return { threw: String(e.message) } } }
+    const ra = attempt(on.code), rb = attempt(off.code)
+    if (ra.threw || rb.threw) {
+      if (!opts.diag) throw new Error(`runtime threw: ${ra.threw || rb.threw}`)
+      if (ra.threw !== rb.threw) throw new Error(`fused ${ra.threw ? "threw" : "ran"}, builder ${rb.threw ? "threw" : "ran"}: ${ra.threw || rb.threw}`)
+    } else {
+      const a = ra.out, b = rb.out
+      if (a.length !== b.length || a.length === 0) throw new Error(`sink count ${a.length} vs ${b.length}`)
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].length !== b[i].length) throw new Error(`buffer ${i} length ${a[i].length} vs ${b[i].length}`)
+        for (let k = 0; k < a[i].length; k++) {
+          if (!Object.is(a[i][k], b[i][k])) throw new Error(`buffer ${i}[${k}]: fused ${a[i][k]} !== builder ${b[i][k]}\n  fused:   [${a[i]}]\n  builder: [${b[i]}]`)
+        }
       }
     }
   } catch (e) {
