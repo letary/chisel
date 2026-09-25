@@ -64,8 +64,10 @@ A third chain shape rides the same machinery, but for *data* rather than math: t
 `curve()` / `colorCurve()` builders, whose entire state is the flat `Float32Array` the native particle
 bridge expects. A literal chain is fully known at compile time, so `curve(0.3).fade(0.15)` becomes
 `{ _data: new Float32Array([0,0.3,0.3,4,0,0,0,0.15,1,1,0.85,1,1,1,0,0]) }` — the same duck type the
-runtime builder presents through its `_data` getter — with hex colors parsed to floats at build time
-(the strings never ship, and the parser tree-shakes away).
+runtime builder presents through its `_data` getter — with color literals parsed to floats at build
+time (the strings never ship). Colors go through the `anycanvas-css-color` crate, the Rust twin of the
+CSS parser the LeCodes runtime and SDK use (one golden corpus holds the three bit-equal), so `'red'`,
+`'rgb(0 0 0 / 50%)'` and `'hsl(210 50% 40%)'` fold to exactly the float32s the builder would compute.
 
 Because a builder is **mutable** (`.to()` returns `this`), a chain is only rewritten where its value
 is *immediately consumed*: a call argument, an object-literal property, the right side of a member
@@ -79,7 +81,7 @@ otherwise only warn about on-device — stop `t` out of order or outside `0..1`,
 `.from()` after another stop, an unparsable color literal — and reports `path:line:col: message`
 through `Output.diagnostics`, leaving the chain alone so runtime behavior is unchanged. Validation
 runs regardless of `fuse`; only the rewrite is opt-in. `node scripts/curve-exact.mjs` bundles a
-44-case corpus twice (fusion on and off), runs both, and compares every float of every buffer the two
+53-case corpus twice (fusion on and off), runs both, and compares every float of every buffer the two
 produce.
 
 ## Use

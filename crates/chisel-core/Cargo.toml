@@ -8,6 +8,9 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+# The CSS color parser of AnyCanvas (the Rust twin of css_color.h, bit-equal to the runtime's header
+# and the SDK's TS twin): what `colorCurve()` literals fold through.
+anycanvas-css-color = { git = "https://github.com/letary/AnyCanvas", rev = "f093b71a5dd60cec7fe66d8c8bd4912a63f6b250" }
 swc_core = { version = "71.0.4", features = [
     "common",
     "ecma_ast",
