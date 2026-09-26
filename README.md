@@ -99,7 +99,7 @@ echo '{"files":{"/main.ts":"..."},"entry":"/main.ts","inject":["/inject.ts"],"mi
 ```
 
 Input: `{ files: {path→source}, entry, inject: [paths], format: "esm"|"iife", minify, fuse, define,
-assets, sourcemap, keep, reactive_ui, flatten_ui }`. Output: `{ code, map?, diagnostics, error? }`.
+assets, sourcemap, keep, reactive_ui, flatten_ui, vocab }`. Output: `{ code, map?, diagnostics, error? }`.
 
 - `inject` — every export of these entries becomes an ambient global (esbuild `inject:` semantics).
 - `define` — compile-time global substitutions (numeric, e.g. `DEG2RAD` → `0.0174…`).
@@ -126,6 +126,25 @@ assets, sourcemap, keep, reactive_ui, flatten_ui }`. Output: `{ code, map?, diag
   constructor branches on `typeof`), composing with `reactive_ui`'s `__uiMap` memoization on the
   same call. Anything unproven falls back to the normal call. Requires an SDK with variadic
   factory dispatch + `__UI*` raw builders. Off by default.
+- `vocab` — the SDK's **vocabulary manifest**: every SDK name the passes key on. The passes are
+  algorithms over SDK-shaped code; the names they look for (the UI factories and their raw
+  builders, the builder methods that keep a chain a node, the signal factories and `.value`, the
+  Vec3 / date / curve names and the methods each fusion lowers, the component-write helpers and
+  hook, the asset macro) belong to the SDK, which declares them in one object and passes it here.
+  With `vocab`, its entries **replace** the built-in ones (a list is never merged); without, the
+  built-in defaults apply (the schema-1 manifest, the fallback for an older SDK). Shape and docs:
+  [`crates/chisel-core/src/vocab.rs`](crates/chisel-core/src/vocab.rs); the LeCodes SDK's manifest
+  (`sdk/src/chisel.ts`) is copied to [`fixtures/vocab.json`](fixtures/vocab.json), which the pass
+  tests run on. Groups: `ui`, `signals`, `fusion` (`vec3`, `date`, `curve`), `compWrite`, `assets`.
+  Role maps (`fusion.vec3.methods`, `fusion.date.methods`, `fusion.curve.stops`, `…range`) name the
+  SDK method each lowering mirrors — the lowering itself stays in chisel.
+  `schema` is the manifest's contract version: a **newer** schema than this chisel implements is a
+  hard error (upgrade chisel); a group, field or role a manifest omits takes its default (how an
+  older schema stays readable — a role is switched off by mapping it to `""`, not by omitting it);
+  an unknown field is an error. So an SDK rename is a manifest edit, and a chisel release is needed
+  only when a pass's algorithm changes or the schema grows. Not vocabulary (stays in chisel): JS
+  builtins, chisel's own `__chisel_*` names, the helpers' calling conventions, and the values a
+  mirrored method body interprets (curve modes, date units, default arguments, native limits).
 - `scan: true` — no bundling: parse every JS/TS module in `files` (`.d.ts` skipped) and return
   `Output.scan = { path: { imports: [resolved paths], hasExports } }` — the dependency facts entry
   detection needs before an entry is known. `entry` is not required in this mode; per-file parse

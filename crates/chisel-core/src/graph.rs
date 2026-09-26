@@ -19,6 +19,7 @@ use crate::parse;
 use crate::reactive_ui;
 use crate::resolve;
 use crate::tla;
+use crate::vocab::Vocab;
 
 /// A specifier that imports a non-JS/TS file is an asset (`./hero.png`, `./model.glb`, `./font.ttf`).
 fn is_asset_specifier(spec: &str) -> bool {
@@ -183,9 +184,11 @@ impl VisitMut for ConstFold {
     }
 }
 
-/// Replaces `asset("./x")` calls with the asset's URL string (compile-time macro).
+/// Replaces `asset("./x")` calls with the asset's URL string (compile-time macro; the name is the
+/// vocabulary's `assets.macro`).
 struct AssetDesugar<'a> {
     assets: &'a HashMap<String, String>,
+    macro_name: &'a str,
     unresolved_ctxt: SyntaxContext,
 }
 impl VisitMut for AssetDesugar<'_> {
@@ -194,7 +197,7 @@ impl VisitMut for AssetDesugar<'_> {
         if let Expr::Call(call) = e {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Ident(id) = &**callee {
-                    if id.sym == "asset" && id.ctxt == self.unresolved_ctxt && call.args.len() == 1 && call.args[0].spread.is_none() {
+                    if id.sym == self.macro_name && id.ctxt == self.unresolved_ctxt && call.args.len() == 1 && call.args[0].spread.is_none() {
                         if let Expr::Lit(Lit::Str(s)) = &*call.args[0].expr {
                             let url = asset_url(self.assets, s.value.as_str().unwrap_or(""));
                             *e = string_expr(&url);
@@ -321,6 +324,7 @@ pub fn build(
     define: &HashMap<String, String>,
     reactive_ui: bool,
     flatten_ui: bool,
+    vocab: &Vocab,
 ) -> anyhow::Result<ModuleGraph> {
     let exists = |p: &str| files.contains_key(p);
     let define_exprs = parse_define(define);
@@ -363,7 +367,7 @@ pub fn build(
             first_top_binding_ctxt(&module).unwrap_or_else(|| SyntaxContext::empty().apply_mark(top_level_mark));
 
         // Desugar `asset("./x")` calls to their URL string (compile-time macro).
-        module.visit_mut_with(&mut AssetDesugar { assets, unresolved_ctxt });
+        module.visit_mut_with(&mut AssetDesugar { assets, macro_name: &vocab.assets.macro_name, unresolved_ctxt });
         // Substitute `define`d free globals (DEG2RAD/RAD2DEG → numeric literals, EDITOR → a
         // boolean), then fold the branches boolean defines decide.
         if !define_exprs.is_empty() {
@@ -375,13 +379,13 @@ pub fn build(
         // Reactive-UI desugaring (memoized children maps + auto-wrapped signal reads). Keys on
         // free (unresolved) references to the injected globals, so SDK modules are inert.
         if reactive_ui {
-            reactive_ui::apply(&path, unresolved_ctxt, &mut module);
+            reactive_ui::apply(&path, unresolved_ctxt, &mut module, &vocab.ui, &vocab.signals);
         }
         // Flatten literal array args of UI factory calls into variadic args (the runtime flattens
         // array arguments one level either way; this saves an allocation per call site). Runs
         // after reactive_ui so its position-based decisions see the original call shapes.
         if flatten_ui {
-            flatten_ui::apply(unresolved_ctxt, &mut module);
+            flatten_ui::apply(unresolved_ctxt, &mut module, &vocab.ui);
         }
 
         let mut imports: Vec<(String, Vec<ImportSpec>)> = Vec::new();

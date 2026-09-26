@@ -21,6 +21,7 @@ pub mod reactive_ui;
 pub mod resolve;
 pub mod scan;
 pub mod tla;
+pub mod vocab;
 
 /// Output module format.
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
@@ -87,6 +88,14 @@ pub struct Input {
     /// factory dispatch (`buildUI`). Off by default.
     #[serde(default)]
     pub flatten_ui: bool,
+    /// The SDK's vocabulary manifest — every SDK name the passes key on (UI factories and builder
+    /// methods, signal factories, the Vec3 / date / curve names, the component-write helpers, the
+    /// asset macro). When present, its entries replace the built-in ones (a group or field it omits
+    /// takes the default — how an older schema stays readable); absent, the built-in defaults (an
+    /// SDK older than the manifest). A manifest with a newer `schema` than this chisel implements is
+    /// a hard error. Shape and rules: [`vocab::Vocab`].
+    #[serde(default)]
+    pub vocab: Option<serde_json::Value>,
 }
 
 /// Bundler output. `error` is `Some` on a hard failure (and `code` is empty).
@@ -127,6 +136,7 @@ fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>, Vec<St
         }
     }
 
+    let vocab = vocab::Vocab::from_input(input.vocab.as_ref())?;
     let cm = parse::source_map();
 
     // The whole graph build + link runs inside one GLOBALS scope so every module's marks/contexts
@@ -135,12 +145,12 @@ fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>, Vec<St
         let mut entries = vec![input.entry.clone()];
         entries.extend(input.inject.iter().cloned());
 
-        let mut g = graph::build(&cm, &input.files, &entries, &input.assets, &input.define, input.reactive_ui, input.flatten_ui)?;
+        let mut g = graph::build(&cm, &input.files, &entries, &input.assets, &input.define, input.reactive_ui, input.flatten_ui, &vocab)?;
         let entry_id = g.path_to_id[&input.entry];
         let inject_ids: Vec<usize> = input.inject.iter().map(|p| g.path_to_id[p]).collect();
 
         let mut diagnostics = Vec::new();
-        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse, &input.keep, &cm, &mut diagnostics)?;
+        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse, &input.keep, &vocab, &cm, &mut diagnostics)?;
         let (code, map) = emit::codegen(&cm, &merged, input.minify, input.sourcemap)?;
         // The IIFE wrapper must not add a leading line, or every source-map line would shift by one.
         let code = match input.format {

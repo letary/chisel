@@ -43,17 +43,16 @@ use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 
 use crate::fusion::{is_simple, nth, num, plain_ident, str_lit, str_lit_of};
+use crate::vocab::{self, CurveRange, StopOp};
 
 type Key = (Atom, SyntaxContext);
 
 /// `kPsMaxCurveStops` in `creator-gl/src/particles.h` — a longer curve is rejected native-side.
 const MAX_STOPS: usize = 8;
 
-/// Builder methods that add a stop. Every one of them mutates and returns `this`.
-const STOP_METHODS: &[&str] = &["from", "via", "to", "fade"];
-
 /// The two factory identities the pass keys on, resolved by the linker from the injected SDK globals
-/// (`packages/sdk/src/gl/Particles.ts`). Either may be absent — a project's SDK need not export both.
+/// (the factory names, the stop methods, the payload field and the range bounds are the SDK's
+/// vocabulary, `vocab::Curve`). Either may be absent — a project's SDK need not export both.
 pub struct CurveCtx {
     pub curve: Option<Key>,
     pub color_curve: Option<Key>,
@@ -82,14 +81,6 @@ struct Chain {
 }
 
 impl Chain {
-    fn factory(&self) -> &'static str {
-        if self.color {
-            "colorCurve"
-        } else {
-            "curve"
-        }
-    }
-
     /// `true` when the builder prepends an implicit identity stop at t = 0 (its `_data` getter does
     /// this whenever the first explicit stop starts late).
     fn prepends(&self) -> bool {
@@ -155,6 +146,7 @@ impl Chain {
 
 pub struct CurveFuser<'a> {
     ctx: &'a CurveCtx,
+    names: &'a vocab::Curve,
     cm: &'a Lrc<SourceMap>,
     /// Rewrite chains, or only validate them (`fuse` off).
     rewrite: bool,
@@ -255,17 +247,19 @@ impl CurveFuser<'_> {
         let span = e.span();
         let Some(chain) = self.build(e) else { return };
         if let Some(problem) = chain.invalid() {
-            self.warn(span, chain.factory(), &problem);
+            self.warn(span, chain.color, &problem);
             return;
         }
         if self.rewrite && allow {
             self.fused += 1;
-            *e = data_object(chain.data());
+            *e = data_object(chain.data(), &self.names.data);
         }
     }
 
-    fn warn(&mut self, span: Span, factory: &str, msg: &str) {
+    /// A diagnostic against the numeric (`color = false`) or the color factory.
+    fn warn(&mut self, span: Span, color: bool, msg: &str) {
         let at = loc(self.cm, span);
+        let factory = if color { &self.names.color_factory } else { &self.names.factory };
         self.diags.push(format!("{at}: {factory}(): {msg}"));
     }
 
@@ -285,7 +279,7 @@ impl CurveFuser<'_> {
                     None
                 }
             }
-            Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) if STOP_METHODS.contains(&name.sym.as_str()) => {
+            Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) if self.names.stops.op(&name.sym).is_some() => {
                 self.chain_root(obj)
             }
             _ => None,
@@ -306,19 +300,21 @@ impl CurveFuser<'_> {
                     self.num_root(call)
                 }
             }
-            Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) if STOP_METHODS.contains(&name.sym.as_str()) => {
+            Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) => {
+                let stop = self.names.stops.op(&name.sym)?;
                 let mut chain = self.build(obj)?;
-                self.apply(&mut chain, &name.sym, &call.args, call.span)?;
+                self.apply(&mut chain, stop, &call.args, call.span)?;
                 Some(chain)
             }
             _ => None,
         }
     }
 
-    /// `curve(base = 1, mode = 'multiply')`.
+    /// `curve(base = 1, mode = 'multiply')`. The mode strings are not vocabulary: they are values the
+    /// builder's body maps to the record's kind code (like the defaults here), i.e. the lowering.
     fn num_root(&mut self, call: &CallExpr) -> Option<Chain> {
         let base = match nth(&call.args, 0) {
-            Some(b) => num_pair(&b)?,
+            Some(b) => num_pair(&b, &self.names.range)?,
             None => vec![num(1.0), num(1.0)],
         };
         let kind = match nth(&call.args, 1) {
@@ -327,7 +323,7 @@ impl CurveFuser<'_> {
                 "add" => 1.0,
                 "multiply" => 0.0,
                 other => {
-                    self.warn(call.span, "curve", &format!("unknown mode '{other}' (expected 'multiply' or 'add')"));
+                    self.warn(call.span, false, &format!("unknown mode '{other}' (expected 'multiply' or 'add')"));
                     return None;
                 }
             },
@@ -344,29 +340,30 @@ impl CurveFuser<'_> {
         Some(Chain { color: true, kind: 0.0, base, stops: Vec::new() })
     }
 
-    fn apply(&mut self, chain: &mut Chain, method: &str, args: &[ExprOrSpread], span: Span) -> Option<()> {
-        match method {
-            "from" => {
+    fn apply(&mut self, chain: &mut Chain, stop: StopOp, args: &[ExprOrSpread], span: Span) -> Option<()> {
+        match stop {
+            StopOp::From => {
                 if !chain.stops.is_empty() {
                     // The builder throws on this; leave the call in place so it still does.
-                    self.warn(span, chain.factory(), ".from() must come before any other stop");
+                    let msg = format!(".{}() must come before any other stop", self.names.stops.from);
+                    self.warn(span, chain.color, &msg);
                     return None;
                 }
                 let vals = self.stop_value(chain, &nth(args, 0)?, span)?;
                 chain.stops.push(Stop { t: 0.0, vals });
             }
-            "via" => {
+            StopOp::Via => {
                 let t = num_lit_of(&nth(args, 0)?)?;
                 let vals = self.stop_value(chain, &nth(args, 1)?, span)?;
                 chain.stops.push(Stop { t, vals });
             }
-            "to" => {
+            StopOp::To => {
                 let vals = self.stop_value(chain, &nth(args, 0)?, span)?;
                 chain.stops.push(Stop { t: 1.0, vals });
             }
             // `.fade(fadeIn = 0.15, fadeOut = fadeIn)` — numeric curves only, and the stop *count*
             // depends on the clamped values, so both must be literals.
-            "fade" => {
+            StopOp::Fade => {
                 if chain.color {
                     return None;
                 }
@@ -394,7 +391,6 @@ impl CurveFuser<'_> {
                     push(1.0, 0.0);
                 }
             }
-            _ => return None,
         }
         Some(())
     }
@@ -403,7 +399,7 @@ impl CurveFuser<'_> {
         if chain.color {
             self.color_pair(v, span)
         } else {
-            num_pair(v)
+            num_pair(v, &self.names.range)
         }
     }
 
@@ -412,7 +408,7 @@ impl CurveFuser<'_> {
     /// slots, so a computed value would have to be evaluated twice.
     fn color_pair(&mut self, e: &Expr, span: Span) -> Option<Vec<Expr>> {
         if let Expr::Object(o) = unparen(e) {
-            let (min, max) = obj_min_max(o)?;
+            let (min, max) = obj_min_max(o, &self.names.range)?;
             let lo = self.rgba(&min, span)?;
             let hi = self.rgba(&max, span)?;
             return Some(lo.iter().chain(hi.iter()).map(|v| num(*v)).collect());
@@ -433,7 +429,7 @@ impl CurveFuser<'_> {
                 match css::parse(raw) {
                     Some(c) => Some([c.r as f64, c.g as f64, c.b as f64, c.a as f64]),
                     None => {
-                        self.warn(span, "colorCurve", &format!("'{raw}' is not a color (a CSS color: #rgb / #rrggbb / #rrggbbaa, rgb() / hsl(), a name)"));
+                        self.warn(span, true, &format!("'{raw}' is not a color (a CSS color: #rgb / #rrggbb / #rrggbbaa, rgb() / hsl(), a name)"));
                         None
                     }
                 }
@@ -444,7 +440,7 @@ impl CurveFuser<'_> {
                 let v = num_lit_of(other)?;
                 if v.fract() != 0.0 || v < 0.0 || v > 0xFFFFFF as f64 {
                     let shown = if v.fract() == 0.0 && v >= 0.0 { format!("0x{:x} ({v})", v as u64) } else { v.to_string() };
-                    self.warn(span, "colorCurve", &format!("{shown} is not a color — a number is an opaque 0xRRGGBB (an integer 0..0xFFFFFF); write alpha as '#rrggbbaa' or [r, g, b, a]"));
+                    self.warn(span, true, &format!("{shown} is not a color — a number is an opaque 0xRRGGBB (an integer 0..0xFFFFFF); write alpha as '#rrggbbaa' or [r, g, b, a]"));
                     return None;
                 }
                 let v = v as u32;
@@ -468,9 +464,9 @@ impl CurveFuser<'_> {
 // ---- numeric values ----------------------------------------------------------------------------
 
 /// A `Range<number>` (`number | { min, max }`) as the (lo, hi) pair the builder's `lohi` produces.
-fn num_pair(e: &Expr) -> Option<Vec<Expr>> {
+fn num_pair(e: &Expr, range: &CurveRange) -> Option<Vec<Expr>> {
     if let Expr::Object(o) = unparen(e) {
-        let (min, max) = obj_min_max(o)?;
+        let (min, max) = obj_min_max(o, range)?;
         return Some(vec![min, max]);
     }
     if let Some(v) = num_lit_of(e) {
@@ -479,7 +475,7 @@ fn num_pair(e: &Expr) -> Option<Vec<Expr>> {
     // Not a literal: mirror `lohi` inline. Only for expressions that are free to evaluate twice —
     // the pair reads the value in both slots (and a `typeof` test on each).
     if is_simple(e) {
-        return Some(vec![lohi_pick(e, "min"), lohi_pick(e, "max")]);
+        return Some(vec![lohi_pick(e, &range.min), lohi_pick(e, &range.max)]);
     }
     None
 }
@@ -507,7 +503,7 @@ fn lohi_pick(e: &Expr, field: &str) -> Expr {
 /// The `min` / `max` values of an object literal. Both must be present (the runtime reads both), and
 /// out-of-order props are only accepted for expressions that are safe to reorder — the payload
 /// always evaluates min before max.
-fn obj_min_max(o: &ObjectLit) -> Option<(Expr, Expr)> {
+fn obj_min_max(o: &ObjectLit, range: &CurveRange) -> Option<(Expr, Expr)> {
     let mut min: Option<(usize, Expr)> = None;
     let mut max: Option<(usize, Expr)> = None;
     for (i, p) in o.props.iter().enumerate() {
@@ -517,10 +513,12 @@ fn obj_min_max(o: &ObjectLit) -> Option<(Expr, Expr)> {
             Prop::Shorthand(id) => (id.sym.to_string(), Expr::Ident(id.clone())),
             _ => return None,
         };
-        match name.as_str() {
-            "min" => min = Some((i, value)),
-            "max" => max = Some((i, value)),
-            _ => return None,
+        if name == range.min {
+            min = Some((i, value));
+        } else if name == range.max {
+            max = Some((i, value));
+        } else {
+            return None;
         }
     }
     let (mi, min) = min?;
@@ -565,8 +563,8 @@ fn num_lit_of(e: &Expr) -> Option<f64> {
 // ---- output ------------------------------------------------------------------------------------
 
 /// `{ _data: new Float32Array([…]) }` — the duck type the runtime builder presents through its
-/// `_data` getter, so `Particles`' record assembly has one consumption path.
-fn data_object(values: Vec<Expr>) -> Expr {
+/// `_data` getter (`field`), so `Particles`' record assembly has one consumption path.
+fn data_object(values: Vec<Expr>, field: &str) -> Expr {
     let arr = Expr::Array(ArrayLit {
         span: DUMMY_SP,
         elems: values.into_iter().map(|e| Some(ExprOrSpread { spread: None, expr: Box::new(e) })).collect(),
@@ -581,7 +579,7 @@ fn data_object(values: Vec<Expr>) -> Expr {
     Expr::Object(ObjectLit {
         span: DUMMY_SP,
         props: vec![PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-            key: PropName::Ident(IdentName::new(Atom::from("_data"), DUMMY_SP)),
+            key: PropName::Ident(IdentName::new(Atom::from(field), DUMMY_SP)),
             value: Box::new(buf),
         })))],
     })
@@ -603,11 +601,12 @@ fn loc(cm: &Lrc<SourceMap>, span: Span) -> String {
 pub fn fuse_curves_module(
     module: &mut Module,
     ctx: &CurveCtx,
+    names: &vocab::Curve,
     rewrite: bool,
     cm: &Lrc<SourceMap>,
     diags: &mut Vec<String>,
 ) -> usize {
-    let mut f = CurveFuser { ctx, cm, rewrite, diags: Vec::new(), allow: false, fused: 0 };
+    let mut f = CurveFuser { ctx, names, cm, rewrite, diags: Vec::new(), allow: false, fused: 0 };
     module.visit_mut_with(&mut f);
     diags.append(&mut f.diags);
     f.fused

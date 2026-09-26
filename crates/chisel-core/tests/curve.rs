@@ -6,6 +6,8 @@ use std::collections::HashMap;
 
 use chisel_core::{bundle, Format, Input, Output};
 
+mod common;
+
 const CURVE_SDK: &str = include_str!("../../../fixtures/curve-sdk/curve.ts");
 const CURVE_INJECT: &str = include_str!("../../../fixtures/curve-sdk/inject.ts");
 const COLOR_SDK: &str = include_str!("../../../fixtures/curve-sdk/color.ts");
@@ -36,7 +38,7 @@ fn build(main: &str, fuse: bool) -> Output {
         define: Default::default(),
         sourcemap: false,
         keep: vec!["_*".into()],
-        reactive_ui: false, flatten_ui: false,
+        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(),
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     out
