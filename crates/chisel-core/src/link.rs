@@ -21,7 +21,7 @@
 //! Phase C — **concatenate** kept items/members in dependency order, unwrapping `export`.
 //! Phase D — **hygiene()** finalizes globally-unique names; emit one `Module`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use swc_core::atoms::Atom;
 use swc_core::common::sync::Lrc;
@@ -31,6 +31,7 @@ use swc_core::ecma::transforms::base::hygiene::hygiene;
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use crate::graph::{self, ModuleGraph};
+use crate::vocab::Vocab;
 
 type Key = (Atom, SyntaxContext);
 
@@ -473,6 +474,7 @@ pub fn link(
     inject_ids: &[usize],
     fuse: bool,
     keep: &[String],
+    vocab: &Vocab,
     cm: &Lrc<SourceMap>,
     diagnostics: &mut Vec<String>,
 ) -> anyhow::Result<Module> {
@@ -506,11 +508,11 @@ pub fn link(
     // --- component writes on SDK-owned vectors (`c.velocity.y = 7` → `__compWrite(c, …)`), before
     // Phase A so the helper references resolve like any other injected global. Off unless the SDK
     // exports both helpers, so an older SDK bundles exactly as before. ---
-    let comp_live: HashSet<Atom> = if [crate::comp_write::WRITE_HELPER, crate::comp_write::OP_HELPER]
+    let comp_live: HashSet<Atom> = if [&vocab.comp_write.write, &vocab.comp_write.op]
         .iter()
-        .all(|h| sdk_map.contains_key(&Atom::from(*h)))
+        .all(|h| sdk_map.contains_key(&Atom::from(h.as_str())))
     {
-        crate::comp_write::apply(graph, diagnostics)
+        crate::comp_write::apply(graph, &vocab.comp_write, diagnostics)
     } else {
         HashSet::new()
     };
@@ -525,18 +527,19 @@ pub fn link(
 
     // --- math chain fusion (runs before DCE so fused-away methods become dead). ---
     if fuse {
-        if let Some(t) = sdk_map.get(&Atom::from("Vec3")) {
+        let names = &vocab.fusion;
+        if let Some(t) = sdk_map.get(&Atom::from(names.vec3.class.as_str())) {
             let key = (t.sym.clone(), t.ctxt);
             for i in 0..n {
-                crate::fusion::fuse_module(&mut graph.modules[i].module, key.clone());
+                crate::fusion::fuse_module(&mut graph.modules[i].module, key.clone(), &names.vec3);
             }
         }
         // Date chains: the `date()` value type. Enabled only when its module still declares the
         // internal helpers the lowering emits references to (so it degrades safely if datetime.ts
         // is refactored). All date-module top-levels share `date`'s top_level_ctxt.
-        if let Some(t) = sdk_map.get(&Atom::from("date")) {
+        if let Some(t) = sdk_map.get(&Atom::from(names.date.factory.as_str())) {
             let ctxt = t.ctxt;
-            let mut names: HashSet<Atom> = HashSet::new();
+            let mut declared: HashSet<Atom> = HashSet::new();
             for m in &graph.modules {
                 if m.top_level_ctxt != ctxt {
                     continue;
@@ -544,22 +547,23 @@ pub fn link(
                 for item in &m.module.body {
                     if let Some(decl) = item_decl(item) {
                         for k in binding_keys_of_decl(decl, ctxt) {
-                            names.insert(k.0);
+                            declared.insert(k.0);
                         }
                     }
                 }
             }
-            let need = ["DateValue", "toMs", "formatImpl", "timeAgoImpl"];
-            if need.iter().all(|nm| names.contains(&Atom::from(*nm))) {
+            let d = &names.date;
+            let need = [&d.class, &d.to_ms, &d.format_impl, &d.time_ago_impl];
+            if need.iter().all(|nm| declared.contains(&Atom::from(nm.as_str()))) {
                 let ctx = crate::fusion::DateCtx {
                     date: (t.sym.clone(), ctxt),
-                    date_value: (Atom::from("DateValue"), ctxt),
-                    to_ms: (Atom::from("toMs"), ctxt),
-                    format_impl: (Atom::from("formatImpl"), ctxt),
-                    time_ago_impl: (Atom::from("timeAgoImpl"), ctxt),
+                    date_value: (Atom::from(d.class.as_str()), ctxt),
+                    to_ms: (Atom::from(d.to_ms.as_str()), ctxt),
+                    format_impl: (Atom::from(d.format_impl.as_str()), ctxt),
+                    time_ago_impl: (Atom::from(d.time_ago_impl.as_str()), ctxt),
                 };
                 for i in 0..n {
-                    crate::fusion::fuse_dates_module(&mut graph.modules[i].module, &ctx);
+                    crate::fusion::fuse_dates_module(&mut graph.modules[i].module, &ctx, d);
                 }
             }
         }
@@ -570,11 +574,12 @@ pub fn link(
     // build-time diagnostic. Validation runs always; the rewrite to a flat `_data` buffer only under
     // `fuse` (and, like the other fusers, before DCE so a fully-fused bundle drops the builders). ---
     {
+        let names = &vocab.fusion.curve;
         let key_of = |name: &str| sdk_map.get(&Atom::from(name)).map(|t| (t.sym.clone(), t.ctxt));
-        let ctx = crate::curve::CurveCtx { curve: key_of("curve"), color_curve: key_of("colorCurve") };
+        let ctx = crate::curve::CurveCtx { curve: key_of(&names.factory), color_curve: key_of(&names.color_factory) };
         if !ctx.is_empty() {
             for i in 0..n {
-                crate::curve::fuse_curves_module(&mut graph.modules[i].module, &ctx, fuse, cm, diagnostics);
+                crate::curve::fuse_curves_module(&mut graph.modules[i].module, &ctx, names, fuse, cm, diagnostics);
             }
         }
     }
@@ -781,7 +786,9 @@ pub fn link(
             key_module.insert(k, mid);
         }
     }
-    let mut module_deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    // Ordered sets: the DFS below visits a module's deps in this order, and emit order decides
+    // hygiene's renames — a std HashSet (per-process random seed) made bundles differ run to run.
+    let mut module_deps: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
     for (mid, m) in graph.modules.iter().enumerate() {
         for item in m.module.body.iter() {
             if !item_is_kept(item, mid, m.top_level_ctxt, &user, &reached) {
@@ -950,7 +957,7 @@ fn reachable_from(graph: &ModuleGraph, start: usize) -> HashSet<usize> {
     seen
 }
 
-fn topo_order(deps: &[HashSet<usize>], n: usize) -> Vec<usize> {
+fn topo_order(deps: &[BTreeSet<usize>], n: usize) -> Vec<usize> {
     let mut visited = vec![false; n];
     let mut order = Vec::with_capacity(n);
     for start in 0..n {
@@ -959,7 +966,7 @@ fn topo_order(deps: &[HashSet<usize>], n: usize) -> Vec<usize> {
     order
 }
 
-fn topo_visit(deps: &[HashSet<usize>], id: usize, visited: &mut [bool], order: &mut Vec<usize>) {
+fn topo_visit(deps: &[BTreeSet<usize>], id: usize, visited: &mut [bool], order: &mut Vec<usize>) {
     if visited[id] {
         return;
     }

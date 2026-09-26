@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 use chisel_core::{bundle, Format, Input};
 
+mod common;
+
 /// A miniature SDK inject with just the globals the pass keys on.
 const SDK: &str = r#"
 export const UIColumn = (a: any, b?: any) => ({ a, b })
@@ -30,7 +32,7 @@ fn run(main: &str, reactive_ui: bool) -> String {
         define: Default::default(),
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui, flatten_ui: false,
+        reactive_ui, flatten_ui: false, vocab: common::sdk_vocab(),
     });
     assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
     out.code

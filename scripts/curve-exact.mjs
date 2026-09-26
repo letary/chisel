@@ -92,9 +92,11 @@ const cases = [
 ]
 
 // `keep: ["_*"]` is what lecodes-cli passes: the `_data` getter has no in-bundle caller here (the
-// host reads it), and without it method-DCE would drop the very thing under test.
+// host reads it), and without it method-DCE would drop the very thing under test. `vocab` too: the
+// SDK's manifest (fixtures/vocab.json), so the corpus runs the names a LeCodes compile runs.
+const vocab = JSON.parse(readFileSync(join(root, "fixtures/vocab.json"), "utf8"))
 const run = (files, fuse) => {
-  const input = JSON.stringify({ files, entry: "/main.ts", inject: ["/__sdk/inject.ts"], format: "esm", minify: false, fuse, keep: ["_*"] })
+  const input = JSON.stringify({ files, entry: "/main.ts", inject: ["/__sdk/inject.ts"], format: "esm", minify: false, fuse, keep: ["_*"], vocab })
   const r = spawnSync(bin, [], { input, encoding: "utf8", maxBuffer: 64 << 20 })
   if (r.status === 2) return { fatal: (r.stderr || "crash").split("\n")[0] }
   try { return JSON.parse(r.stdout || "{}") } catch { return { fatal: "bad json: " + (r.stdout || r.stderr || "").slice(0, 120) } }
