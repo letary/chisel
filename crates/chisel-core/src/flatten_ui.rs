@@ -25,7 +25,8 @@
 //!    still-correct dispatch call.
 //!
 //! Requires an SDK with variadic factory dispatch + `__UI*` raw builders (shipped in lockstep by
-//! the CLI); the flag stays off by default.
+//! the CLI); the flag stays off by default. The factories, their raw builders, the other
+//! node-returning calls and the chain methods are the SDK's vocabulary (`vocab::Ui`).
 
 use std::collections::HashSet;
 
@@ -34,60 +35,33 @@ use swc_core::common::{SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
+use crate::vocab::{has, Ui};
+
 type Key = (Atom, SyntaxContext);
 
-/// Every factory whose runtime goes through the SDK's variadic `buildUI` dispatch (plus `UIPager`,
-/// which flattens tab arguments the same way). All are splice targets.
-const FLATTEN_FACTORIES: &[&str] = &[
-    "UIColumn", "UIRow", "UIBox", "UIButton", "UIScrollable", "UIScreen", "UIWidget",
-    "UIModal", "UIPopover", "UIBottomSheet", "UIPager",
-];
-
-/// Factories with a dispatch-free `__UI*` raw builder in the SDK (raw-lowering targets).
-const RAW_FACTORIES: &[&str] = &[
-    "UIColumn", "UIRow", "UIBox", "UIButton", "UIScrollable", "UIScreen", "UIWidget",
-];
-
-/// Free calls that provably return a UI node (argument provability). Includes the already-lowered
-/// `__UI*` names so inner calls rewritten first keep proving the outer call.
-const NODE_FACTORIES: &[&str] = &[
-    "UIColumn", "UIRow", "UIBox", "UIButton", "UIScrollable", "UIScreen", "UIWidget",
-    "UIText", "UIImage", "UIVideo", "UIInput", "UITextArea", "UISpacer",
-    "UIModal", "UIPopover", "UIBottomSheet", "UIPager",
-    "__UIColumn", "__UIRow", "__UIBox", "__UIButton", "__UIScrollable", "__UIScreen", "__UIWidget",
-];
-
-/// Builder methods that return the node (`this`) — a chain rooted at a node factory stays a node.
-/// Conservative whitelist: an unlisted method (e.g. `getBoundingClientRect`) blocks provability.
-const CHAIN_METHODS: &[&str] = &[
-    "style", "animateTo", "animateFrom", "class", "named",
-    "onClick", "onTouchStart", "onLongPress", "onMouseEnter", "onLayout", "onOpen", "onClose", "onBack",
-    "onScroll", "onScrollRelease", "onOverscroll", "onRefresh", "onSubmit",
-    "onSelect", "onChange", "onFocus", "onBlur", "onOverlayTap", "onDetent",
-    "onEndReached", "onStartReached",
-    "append", "insert", "remove", "setContent", "keepAlive",
-];
-
 /// Apply the pass to one module; returns the number of rewritten call sites.
-pub fn apply(unresolved_ctxt: SyntaxContext, module: &mut Module) -> usize {
+pub fn apply(unresolved_ctxt: SyntaxContext, module: &mut Module, ui: &Ui) -> usize {
     // Fixpoint: `const` bindings initialized from a provable node expression are node-typed.
     let mut vars: HashSet<Key> = HashSet::new();
     loop {
-        let mut collect = NodeCollect { unresolved: unresolved_ctxt, vars: &mut vars, changed: false };
+        let mut collect = NodeCollect { unresolved: unresolved_ctxt, ui, vars: &mut vars, changed: false };
         module.visit_with(&mut collect);
         if !collect.changed {
             break;
         }
     }
-    let mut v = FlattenUi { unresolved: unresolved_ctxt, vars, count: 0 };
+    let mut v = FlattenUi { unresolved: unresolved_ctxt, ui, vars, count: 0 };
     module.visit_mut_with(&mut v);
     v.count
 }
 
-/// Is `e` provably a plain child value (a node, or falsy for conditionals)?
-fn is_node_expr(unresolved: SyntaxContext, vars: &HashSet<Key>, e: &Expr) -> bool {
+/// Is `e` provably a plain child value (a node, or falsy for conditionals)? A node is a free call
+/// to a node-returning factory (`Ui::returns_node` — the raw builders included, so inner calls
+/// rewritten first keep proving the outer call), possibly through builder methods that return the
+/// node (`ui.chain`, a conservative whitelist: an unlisted method blocks provability).
+fn is_node_expr(unresolved: SyntaxContext, ui: &Ui, vars: &HashSet<Key>, e: &Expr) -> bool {
     match e {
-        Expr::Paren(p) => is_node_expr(unresolved, vars, &p.expr),
+        Expr::Paren(p) => is_node_expr(unresolved, ui, vars, &p.expr),
         Expr::Lit(Lit::Null(_)) => true,
         Expr::Lit(Lit::Bool(b)) => !b.value,
         Expr::Ident(id) => {
@@ -96,20 +70,18 @@ fn is_node_expr(unresolved: SyntaxContext, vars: &HashSet<Key>, e: &Expr) -> boo
         }
         Expr::Call(c) => match &c.callee {
             Callee::Expr(callee) => match &**callee {
-                Expr::Ident(id) => id.ctxt == unresolved && NODE_FACTORIES.contains(&id.sym.as_str()),
+                Expr::Ident(id) => id.ctxt == unresolved && ui.returns_node(&id.sym),
                 Expr::Member(m) => match &m.prop {
-                    MemberProp::Ident(p) if CHAIN_METHODS.contains(&p.sym.as_str()) => {
-                        is_node_expr(unresolved, vars, &m.obj)
-                    }
+                    MemberProp::Ident(p) if has(&ui.chain, &p.sym) => is_node_expr(unresolved, ui, vars, &m.obj),
                     _ => false,
                 },
                 _ => false,
             },
             _ => false,
         },
-        Expr::Bin(b) if b.op == BinaryOp::LogicalAnd => is_node_expr(unresolved, vars, &b.right),
+        Expr::Bin(b) if b.op == BinaryOp::LogicalAnd => is_node_expr(unresolved, ui, vars, &b.right),
         Expr::Cond(c) => {
-            is_node_expr(unresolved, vars, &c.cons) && is_node_expr(unresolved, vars, &c.alt)
+            is_node_expr(unresolved, ui, vars, &c.cons) && is_node_expr(unresolved, ui, vars, &c.alt)
         }
         _ => false,
     }
@@ -119,6 +91,7 @@ fn is_node_expr(unresolved: SyntaxContext, vars: &HashSet<Key>, e: &Expr) -> boo
 
 struct NodeCollect<'a> {
     unresolved: SyntaxContext,
+    ui: &'a Ui,
     vars: &'a mut HashSet<Key>,
     changed: bool,
 }
@@ -132,7 +105,7 @@ impl Visit for NodeCollect<'_> {
         for decl in &d.decls {
             let Pat::Ident(b) = &decl.name else { continue };
             let Some(init) = &decl.init else { continue };
-            if is_node_expr(self.unresolved, self.vars, init)
+            if is_node_expr(self.unresolved, self.ui, self.vars, init)
                 && self.vars.insert((b.id.sym.clone(), b.id.ctxt))
             {
                 self.changed = true;
@@ -143,14 +116,16 @@ impl Visit for NodeCollect<'_> {
 
 // ---- the rewriting pass -------------------------------------------------------------------------
 
-struct FlattenUi {
+struct FlattenUi<'a> {
     unresolved: SyntaxContext,
+    ui: &'a Ui,
     vars: HashSet<Key>,
     count: usize,
 }
 
-impl FlattenUi {
-    /// The factory name if `call` is a free call to a factory this pass rewrites.
+impl FlattenUi<'_> {
+    /// The factory name if `call` is a free call to a factory this pass rewrites (one going through
+    /// the variadic dispatch — all of them are splice targets).
     fn factory_name<'e>(&self, call: &'e CallExpr) -> Option<&'e str> {
         let Callee::Expr(callee) = &call.callee else { return None };
         let Expr::Ident(id) = &**callee else { return None };
@@ -158,7 +133,7 @@ impl FlattenUi {
             return None;
         }
         let name = id.sym.as_str();
-        FLATTEN_FACTORIES.contains(&name).then_some(name)
+        has(&self.ui.factories, name).then_some(name)
     }
 
     /// May the array literal at argument position `i` (of `argc` args) be spliced in place?
@@ -181,13 +156,14 @@ impl FlattenUi {
     }
 }
 
-impl VisitMut for FlattenUi {
+impl VisitMut for FlattenUi<'_> {
     fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
         call.visit_mut_children_with(self); // factory calls nested in the arguments rewrite first
-        // Owned facts up front — the &str name must not outlive the arg mutations below.
+        // Owned facts up front — the &str name must not outlive the arg mutations below. `raw` is the
+        // factory's dispatch-free builder, when it has one (the raw-lowering targets).
         let raw: Option<String> = {
             let Some(name) = self.factory_name(call) else { return };
-            RAW_FACTORIES.contains(&name).then(|| format!("__{name}"))
+            self.ui.raw.get(name).cloned()
         };
 
         // Stage 1: splice literal array arguments.
@@ -228,7 +204,7 @@ impl VisitMut for FlattenUi {
         }
 
         // Static form: every argument provably a plain child → `__UIX([args])`.
-        if !call.args.iter().all(|a| a.spread.is_none() && is_node_expr(self.unresolved, &self.vars, &a.expr)) {
+        if !call.args.iter().all(|a| a.spread.is_none() && is_node_expr(self.unresolved, self.ui, &self.vars, &a.expr)) {
             return;
         }
         let elems: Vec<Option<ExprOrSpread>> = std::mem::take(&mut call.args).into_iter().map(Some).collect();

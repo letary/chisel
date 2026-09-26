@@ -1,0 +1,210 @@
+{
+  "schema": 1,
+  "ui": {
+    "factories": [
+      "UIColumn",
+      "UIRow",
+      "UIBox",
+      "UIButton",
+      "UIScrollable",
+      "UIScreen",
+      "UIWidget",
+      "UIModal",
+      "UIPopover",
+      "UIBottomSheet",
+      "UIPager"
+    ],
+    "raw": {
+      "UIColumn": "__UIColumn",
+      "UIRow": "__UIRow",
+      "UIBox": "__UIBox",
+      "UIButton": "__UIButton",
+      "UIScrollable": "__UIScrollable",
+      "UIScreen": "__UIScreen",
+      "UIWidget": "__UIWidget"
+    },
+    "leaves": [
+      "UIText",
+      "UIImage",
+      "UIVideo",
+      "UIInput",
+      "UITextArea",
+      "UISpacer"
+    ],
+    "containers": [
+      "UIColumn",
+      "UIRow",
+      "UIBox",
+      "UIButton",
+      "UIScrollable",
+      "UIScreen",
+      "UIWidget"
+    ],
+    "text": "UIText",
+    "chain": [
+      "style",
+      "animateTo",
+      "animateFrom",
+      "class",
+      "named",
+      "onClick",
+      "onTouchStart",
+      "onLongPress",
+      "onMouseEnter",
+      "onLayout",
+      "onOpen",
+      "onClose",
+      "onBack",
+      "onScroll",
+      "onScrollRelease",
+      "onOverscroll",
+      "onRefresh",
+      "onSubmit",
+      "onSelect",
+      "onChange",
+      "onFocus",
+      "onBlur",
+      "onOverlayTap",
+      "onDetent",
+      "onEndReached",
+      "onStartReached",
+      "append",
+      "insert",
+      "remove",
+      "setContent",
+      "keepAlive"
+    ],
+    "setContent": "setContent",
+    "bindingMethods": [
+      "style",
+      "class"
+    ],
+    "mapHelper": "__uiMap"
+  },
+  "signals": {
+    "factories": [
+      "signal",
+      "computed"
+    ],
+    "value": "value"
+  },
+  "fusion": {
+    "vec3": {
+      "class": "Vec3",
+      "fields": [
+        "x",
+        "y",
+        "z"
+      ],
+      "statics": [
+        "up",
+        "down",
+        "left",
+        "right",
+        "forward",
+        "back",
+        "zero",
+        "one",
+        "from"
+      ],
+      "returning": [
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "scale",
+        "negate",
+        "scaleAndAdd",
+        "cross",
+        "lerp",
+        "clamp",
+        "min",
+        "max",
+        "reflect",
+        "project",
+        "rotateX",
+        "rotateY",
+        "rotateZ",
+        "rotate",
+        "transform",
+        "withX",
+        "withY",
+        "withZ",
+        "clone",
+        "normalize",
+        "copy",
+        "set"
+      ],
+      "methods": {
+        "add": "add",
+        "sub": "sub",
+        "mul": "mul",
+        "scale": "scale",
+        "negate": "negate",
+        "scaleAndAdd": "scaleAndAdd",
+        "cross": "cross",
+        "normalize": "normalize",
+        "dot": "dot",
+        "lengthSq": "lengthSq",
+        "length": "length",
+        "distanceTo": "distanceTo"
+      }
+    },
+    "date": {
+      "factory": "date",
+      "class": "DateValue",
+      "toMs": "toMs",
+      "formatImpl": "formatImpl",
+      "timeAgoImpl": "timeAgoImpl",
+      "field": "t",
+      "returning": [
+        "add",
+        "subtract",
+        "startOf",
+        "endOf"
+      ],
+      "methods": {
+        "add": "add",
+        "subtract": "subtract",
+        "format": "format",
+        "timeAgo": "timeAgo",
+        "valueOf": "valueOf",
+        "unix": "unix",
+        "diff": "diff",
+        "isBefore": "isBefore",
+        "isAfter": "isAfter",
+        "isSame": "isSame"
+      }
+    },
+    "curve": {
+      "factory": "curve",
+      "colorFactory": "colorCurve",
+      "data": "_data",
+      "range": {
+        "min": "min",
+        "max": "max"
+      },
+      "stops": {
+        "from": "from",
+        "via": "via",
+        "to": "to",
+        "fade": "fade"
+      }
+    }
+  },
+  "compWrite": {
+    "write": "__compWrite",
+    "op": "__compOp",
+    "hook": "_writeComp",
+    "list": "_comps",
+    "axes": [
+      "x",
+      "y",
+      "z",
+      "w"
+    ]
+  },
+  "assets": {
+    "macro": "asset"
+  }
+}

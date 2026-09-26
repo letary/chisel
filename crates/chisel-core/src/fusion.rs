@@ -13,6 +13,10 @@
 //! Roots: `new Vec3(...)`, array literals, and **local variables proven to hold a Vec3** (so
 //! per-frame code like `dir.scale(speed*dt)` fuses). Fusion runs before DCE, so methods that are only
 //! ever fused away become unreferenced and the linker drops them.
+//!
+//! The SDK names (the class, its fields, statics and methods, the date factory / class / helpers /
+//! methods) are the SDK's vocabulary (`vocab::Vec3`, `vocab::Date`); each method's lowering, keyed
+//! by its role, is the algorithm.
 
 use std::collections::HashSet;
 
@@ -22,18 +26,14 @@ use swc_core::common::{SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
+use crate::vocab::{self, has, DateOp, Vec3Op};
+
 type Comps = [Expr; 3];
 type Key = (Atom, SyntaxContext);
 
-const VEC3_RETURNING: &[&str] = &[
-    "add", "sub", "mul", "div", "scale", "negate", "scaleAndAdd", "cross", "lerp", "clamp", "min",
-    "max", "reflect", "project", "rotateX", "rotateY", "rotateZ", "rotate", "transform", "withX",
-    "withY", "withZ", "clone", "normalize", "copy", "set",
-];
-const VEC3_STATICS: &[&str] = &["up", "down", "left", "right", "forward", "back", "zero", "one", "from"];
-
-pub struct Fuser {
+pub struct Fuser<'a> {
     vec3: Key,
+    vocab: &'a vocab::Vec3,
     vec_vars: HashSet<Key>,
     /// Temps to hoist before the statement currently being processed.
     temps: Vec<Stmt>,
@@ -43,7 +43,7 @@ pub struct Fuser {
 
 // ---- statement-level temp splicing -------------------------------------------------------------
 
-impl VisitMut for Fuser {
+impl VisitMut for Fuser<'_> {
     fn visit_mut_module_items(&mut self, items: &mut Vec<ModuleItem>) {
         let saved = std::mem::take(&mut self.temps);
         let mut out = Vec::with_capacity(items.len());
@@ -113,7 +113,7 @@ impl VisitMut for Fuser {
 
 // ---- fusion core -------------------------------------------------------------------------------
 
-impl Fuser {
+impl Fuser<'_> {
     /// Hoist `e` into a fresh `const` temp and return a reference to it (so a reused value is
     /// evaluated exactly once). Simple, side-effect-free expressions are returned as-is.
     fn simplify(&mut self, e: Expr) -> Expr {
@@ -145,7 +145,8 @@ impl Fuser {
             }
             Expr::Paren(p) => self.fuse_vec(&p.expr),
             Expr::Ident(id) if self.vec_vars.contains(&(id.sym.clone(), id.ctxt)) => {
-                Some([field(id, "x"), field(id, "y"), field(id, "z")])
+                let [x, y, z] = &self.vocab.fields;
+                Some([field(id, x), field(id, y), field(id, z)])
             }
             Expr::Call(call) => {
                 let (obj, method, args) = as_method_call(call)?;
@@ -159,19 +160,19 @@ impl Fuser {
     fn apply_vec_method(&mut self, o: Comps, method: &str, args: &[ExprOrSpread]) -> Option<Comps> {
         let arg = |i: usize| args.get(i).filter(|a| a.spread.is_none()).map(|a| (*a.expr).clone());
         let [o0, o1, o2] = o;
-        match method {
-            "add" | "sub" | "mul" => {
+        match self.vocab.methods.op(method)? {
+            role @ (Vec3Op::Add | Vec3Op::Sub | Vec3Op::Mul) => {
                 let a0 = arg(0)?;
                 let [v0, v1, v2] = self.fuse_vec(&a0)?;
-                let op = match method { "add" => BinaryOp::Add, "sub" => BinaryOp::Sub, _ => BinaryOp::Mul };
+                let op = match role { Vec3Op::Add => BinaryOp::Add, Vec3Op::Sub => BinaryOp::Sub, _ => BinaryOp::Mul };
                 Some([bin(o0, op, v0), bin(o1, op, v1), bin(o2, op, v2)])
             }
-            "scale" => {
+            Vec3Op::Scale => {
                 let s = self.simplify(arg(0)?);
                 Some([bin(o0, BinaryOp::Mul, s.clone()), bin(o1, BinaryOp::Mul, s.clone()), bin(o2, BinaryOp::Mul, s)])
             }
-            "negate" => Some([neg(o0), neg(o1), neg(o2)]),
-            "scaleAndAdd" => {
+            Vec3Op::Negate => Some([neg(o0), neg(o1), neg(o2)]),
+            Vec3Op::ScaleAndAdd => {
                 let a0 = arg(0)?;
                 let [v0, v1, v2] = self.fuse_vec(&a0)?;
                 let s = self.simplify(arg(1)?);
@@ -181,7 +182,7 @@ impl Fuser {
                     bin(o2, BinaryOp::Add, bin(v2, BinaryOp::Mul, s)),
                 ])
             }
-            "cross" => {
+            Vec3Op::Cross => {
                 let a0 = arg(0)?;
                 let v = self.fuse_vec(&a0)?;
                 let (ox, oy, oz) = (self.simplify(o0), self.simplify(o1), self.simplify(o2));
@@ -193,34 +194,36 @@ impl Fuser {
                     bin(bin(ox, BinaryOp::Mul, vy), BinaryOp::Sub, bin(oy, BinaryOp::Mul, vx)),
                 ])
             }
-            "normalize" => {
+            Vec3Op::Normalize => {
                 // const l = Math.hypot(x,y,z); each component is `l === 0 ? 0 : c / l`.
                 let (ox, oy, oz) = (self.simplify(o0), self.simplify(o1), self.simplify(o2));
                 let l = self.simplify(math_hypot(vec![ox.clone(), oy.clone(), oz.clone()]));
                 Some([norm_comp(ox, &l), norm_comp(oy, &l), norm_comp(oz, &l)])
             }
-            _ => None,
+            Vec3Op::Dot | Vec3Op::LengthSq | Vec3Op::Length | Vec3Op::DistanceTo => None,
         }
     }
 
     fn scalar_terminal(&mut self, e: &Expr) -> Option<Expr> {
         let Expr::Call(call) = e else { return None };
         let (obj, method, args) = as_method_call(call)?;
+        // The receiver is fused BEFORE the method is looked up: a failed attempt still advances the
+        // temp counter, and the order keeps the `__chisel_N` numbering stable.
         let o = self.fuse_vec(obj)?;
         let arg = |i: usize| args.get(i).filter(|a| a.spread.is_none()).map(|a| (*a.expr).clone());
         let [o0, o1, o2] = o;
-        match method.as_str() {
-            "dot" => {
+        match self.vocab.methods.op(&method)? {
+            Vec3Op::Dot => {
                 let a0 = arg(0)?;
                 let [v0, v1, v2] = self.fuse_vec(&a0)?;
                 Some(sum3(bin(o0, BinaryOp::Mul, v0), bin(o1, BinaryOp::Mul, v1), bin(o2, BinaryOp::Mul, v2)))
             }
-            "lengthSq" => {
+            Vec3Op::LengthSq => {
                 let (ox, oy, oz) = (self.simplify(o0), self.simplify(o1), self.simplify(o2));
                 Some(sum3(bin(ox.clone(), BinaryOp::Mul, ox), bin(oy.clone(), BinaryOp::Mul, oy), bin(oz.clone(), BinaryOp::Mul, oz)))
             }
-            "length" => Some(math_hypot(vec![o0, o1, o2])),
-            "distanceTo" => {
+            Vec3Op::Length => Some(math_hypot(vec![o0, o1, o2])),
+            Vec3Op::DistanceTo => {
                 let a0 = arg(0)?;
                 let [v0, v1, v2] = self.fuse_vec(&a0)?;
                 Some(math_hypot(vec![bin(o0, BinaryOp::Sub, v0), bin(o1, BinaryOp::Sub, v1), bin(o2, BinaryOp::Sub, v2)]))
@@ -381,19 +384,19 @@ fn ensure_block(s: &mut Box<Stmt>) {
 
 // ---- Vec3 type inference for local variables ---------------------------------------------------
 
-fn is_vec3_typed(e: &Expr, vec3: &Key, vars: &HashSet<Key>) -> bool {
+fn is_vec3_typed(e: &Expr, vec3: &Key, names: &vocab::Vec3, vars: &HashSet<Key>) -> bool {
     match e {
         Expr::New(NewExpr { callee, .. }) => matches!(&**callee, Expr::Ident(id) if (id.sym.clone(), id.ctxt) == *vec3),
-        Expr::Paren(p) => is_vec3_typed(&p.expr, vec3, vars),
+        Expr::Paren(p) => is_vec3_typed(&p.expr, vec3, names, vars),
         Expr::Ident(id) => vars.contains(&(id.sym.clone(), id.ctxt)),
         Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) => {
-            matches!(&**obj, Expr::Ident(id) if (id.sym.clone(), id.ctxt) == *vec3) && VEC3_STATICS.contains(&name.sym.as_str())
+            matches!(&**obj, Expr::Ident(id) if (id.sym.clone(), id.ctxt) == *vec3) && has(&names.statics, &name.sym)
         }
         Expr::Call(call) => {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) = &**callee {
-                    let static_call = matches!(&**obj, Expr::Ident(id) if (id.sym.clone(), id.ctxt) == *vec3) && VEC3_STATICS.contains(&name.sym.as_str());
-                    let method_call = VEC3_RETURNING.contains(&name.sym.as_str()) && is_vec3_typed(obj, vec3, vars);
+                    let static_call = matches!(&**obj, Expr::Ident(id) if (id.sym.clone(), id.ctxt) == *vec3) && has(&names.statics, &name.sym);
+                    let method_call = has(&names.returning, &name.sym) && is_vec3_typed(obj, vec3, names, vars);
                     return static_call || method_call;
                 }
             }
@@ -415,14 +418,14 @@ impl Visit for VarScan {
     }
 }
 
-fn collect_vec3_vars(module: &Module, vec3: &Key) -> HashSet<Key> {
+fn collect_vec3_vars(module: &Module, vec3: &Key, names: &vocab::Vec3) -> HashSet<Key> {
     let mut scan = VarScan { decls: Vec::new() };
     module.visit_with(&mut scan);
     let mut vars = HashSet::new();
     loop {
         let mut changed = false;
         for (k, init) in &scan.decls {
-            if !vars.contains(k) && is_vec3_typed(init, vec3, &vars) {
+            if !vars.contains(k) && is_vec3_typed(init, vec3, names, &vars) {
                 vars.insert(k.clone());
                 changed = true;
             }
@@ -434,11 +437,12 @@ fn collect_vec3_vars(module: &Module, vec3: &Key) -> HashSet<Key> {
     vars
 }
 
-/// Run fusion over a module. Returns the number of chains fused.
-pub fn fuse_module(module: &mut Module, vec3: Key) -> usize {
+/// Run fusion over a module. `vec3` is the class's identity (resolved from the injected globals),
+/// `names` its vocabulary. Returns the number of chains fused.
+pub fn fuse_module(module: &mut Module, vec3: Key, names: &vocab::Vec3) -> usize {
     module.visit_mut_with(&mut BlockIfy);
-    let vec_vars = collect_vec3_vars(module, &vec3);
-    let mut f = Fuser { vec3, vec_vars, temps: Vec::new(), counter: 0, fused: 0 };
+    let vec_vars = collect_vec3_vars(module, &vec3, names);
+    let mut f = Fuser { vec3, vocab: names, vec_vars, temps: Vec::new(), counter: 0, fused: 0 };
     module.visit_mut_with(&mut f);
     f.fused
 }
@@ -464,6 +468,8 @@ pub fn fuse_module(module: &mut Module, vec3: Key) -> usize {
 
 /// Milliseconds per linear unit — must match `MS` in datetime.ts exactly (integer f64 → bit-exact).
 /// `None` marks the calendar units (month/year), which are not closed-form and are left un-fused.
+/// Not vocabulary: the unit strings are values the mirrored method bodies interpret, and each one's
+/// factor IS the lowering (like the default `format` pattern and `diff`'s default unit below).
 fn unit_ms(u: &str) -> Option<f64> {
     Some(match u {
         "ms" => 1.0,
@@ -475,10 +481,6 @@ fn unit_ms(u: &str) -> Option<f64> {
         _ => return None,
     })
 }
-
-/// Methods that return a `DateValue` — for local-variable type inference (broader than the fusable
-/// set: `startOf`/`endOf` produce a date we can decompose via `.t` even though we can't lower them).
-const DATE_TYPED_METHODS: &[&str] = &["add", "subtract", "startOf", "endOf"];
 
 /// Identities the date-fuser emits references to. All share the date module's `top_level_ctxt`; the
 /// linker verifies the helper bindings exist before enabling the pass.
@@ -492,6 +494,7 @@ pub struct DateCtx {
 
 pub struct DateFuser<'a> {
     ctx: &'a DateCtx,
+    names: &'a vocab::Date,
     date_vars: HashSet<Key>,
     pub fused: usize,
 }
@@ -505,7 +508,7 @@ impl<'a> VisitMut for DateFuser<'a> {
             return;
         }
         // A date-returning chain (`…add/subtract…`) used as a value → rebuild one wrapper.
-        if is_date_returning_call(&*e) {
+        if is_date_returning_call(&*e, &self.names.methods) {
             if let Some(ms) = self.fuse_date(&*e) {
                 self.fused += 1;
                 *e = new_date_value(ms, &self.ctx.date_value);
@@ -522,7 +525,7 @@ impl<'a> DateFuser<'a> {
     fn fuse_date(&self, e: &Expr) -> Option<Expr> {
         match e {
             Expr::Paren(p) => self.fuse_date(&p.expr),
-            Expr::Ident(id) if self.date_vars.contains(&(id.sym.clone(), id.ctxt)) => Some(field(id, "t")),
+            Expr::Ident(id) if self.date_vars.contains(&(id.sym.clone(), id.ctxt)) => Some(field(id, &self.names.field)),
             Expr::Call(call) => {
                 if let Callee::Expr(callee) = &call.callee {
                     if let Expr::Ident(id) = &**callee {
@@ -558,12 +561,12 @@ impl<'a> DateFuser<'a> {
 
     /// Date-returning methods. Only linear-unit `add`/`subtract` fuse to scalar math.
     fn apply_date_method(&self, m: Expr, method: &str, args: &[ExprOrSpread]) -> Option<Expr> {
-        match method {
-            "add" | "subtract" => {
+        match self.names.methods.op(method)? {
+            role @ (DateOp::Add | DateOp::Subtract) => {
                 let n = nth(args, 0)?;
                 let ms = unit_ms(&str_lit_of(&nth(args, 1)?)?)?;
                 let term = bin(n, BinaryOp::Mul, num(ms));
-                let op = if method == "add" { BinaryOp::Add } else { BinaryOp::Sub };
+                let op = if role == DateOp::Add { BinaryOp::Add } else { BinaryOp::Sub };
                 Some(bin(m, op, term))
             }
             _ => None,
@@ -575,8 +578,8 @@ impl<'a> DateFuser<'a> {
         let Expr::Call(call) = e else { return None };
         let (obj, method, args) = as_method_call(call)?;
         let m = self.fuse_date(obj)?;
-        match method.as_str() {
-            "format" => {
+        match self.names.methods.op(&method)? {
+            DateOp::Format => {
                 let pattern = nth(args, 0).unwrap_or_else(|| str_lit("D MMMM YYYY"));
                 let mut a = vec![m, pattern];
                 if let Some(loc) = nth(args, 1) {
@@ -584,7 +587,7 @@ impl<'a> DateFuser<'a> {
                 }
                 Some(call_key(&self.ctx.format_impl, a))
             }
-            "timeAgo" => {
+            DateOp::TimeAgo => {
                 let loc = nth(args, 0).unwrap_or_else(void0);
                 let now = match nth(args, 1) {
                     Some(nw) => self.to_ms_of(nw),
@@ -592,9 +595,9 @@ impl<'a> DateFuser<'a> {
                 };
                 Some(call_key(&self.ctx.time_ago_impl, vec![m, loc, now]))
             }
-            "valueOf" => Some(m),
-            "unix" => Some(global_call("Math", "floor", vec![bin(m, BinaryOp::Div, num(1000.0))])),
-            "diff" => {
+            DateOp::ValueOf => Some(m),
+            DateOp::Unix => Some(global_call("Math", "floor", vec![bin(m, BinaryOp::Div, num(1000.0))])),
+            DateOp::Diff => {
                 let other = self.to_ms_of(nth(args, 0)?);
                 let unit = match nth(args, 1) {
                     Some(u) => str_lit_of(&u)?,
@@ -603,19 +606,20 @@ impl<'a> DateFuser<'a> {
                 let per = unit_ms(&unit)?;
                 Some(global_call("Math", "trunc", vec![bin(bin(m, BinaryOp::Sub, other), BinaryOp::Div, num(per))]))
             }
-            "isBefore" => Some(bin(m, BinaryOp::Lt, self.to_ms_of(nth(args, 0)?))),
-            "isAfter" => Some(bin(m, BinaryOp::Gt, self.to_ms_of(nth(args, 0)?))),
-            "isSame" => Some(bin(m, BinaryOp::EqEqEq, self.to_ms_of(nth(args, 0)?))),
-            _ => None,
+            DateOp::IsBefore => Some(bin(m, BinaryOp::Lt, self.to_ms_of(nth(args, 0)?))),
+            DateOp::IsAfter => Some(bin(m, BinaryOp::Gt, self.to_ms_of(nth(args, 0)?))),
+            DateOp::IsSame => Some(bin(m, BinaryOp::EqEqEq, self.to_ms_of(nth(args, 0)?))),
+            DateOp::Add | DateOp::Subtract => None,
         }
     }
 }
 
-fn is_date_returning_call(e: &Expr) -> bool {
+/// A call of the date methods that fuse to a date (`add` / `subtract`), on any receiver.
+fn is_date_returning_call(e: &Expr, methods: &vocab::DateMethods) -> bool {
     if let Expr::Call(call) = e {
         if let Callee::Expr(callee) = &call.callee {
             if let Expr::Member(MemberExpr { prop: MemberProp::Ident(name), .. }) = &**callee {
-                return matches!(name.sym.as_str(), "add" | "subtract");
+                return matches!(methods.op(&name.sym), Some(DateOp::Add | DateOp::Subtract));
             }
         }
     }
@@ -624,16 +628,18 @@ fn is_date_returning_call(e: &Expr) -> bool {
 
 // ---- Date value type inference for local variables (mirrors the Vec3 fixpoint) -----------------
 
-fn is_date_typed(e: &Expr, date: &Key, vars: &HashSet<Key>) -> bool {
+/// `names.returning` are the methods that return a date — broader than the fusable set: `startOf` /
+/// `endOf` produce a date we can decompose via its field even though we can't lower them.
+fn is_date_typed(e: &Expr, date: &Key, names: &vocab::Date, vars: &HashSet<Key>) -> bool {
     match e {
-        Expr::Paren(p) => is_date_typed(&p.expr, date, vars),
+        Expr::Paren(p) => is_date_typed(&p.expr, date, names, vars),
         Expr::Ident(id) => vars.contains(&(id.sym.clone(), id.ctxt)),
         Expr::Call(call) => {
             if let Callee::Expr(callee) = &call.callee {
                 match &**callee {
                     Expr::Ident(id) => (id.sym.clone(), id.ctxt) == *date,
                     Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(name), .. }) => {
-                        DATE_TYPED_METHODS.contains(&name.sym.as_str()) && is_date_typed(obj, date, vars)
+                        has(&names.returning, &name.sym) && is_date_typed(obj, date, names, vars)
                     }
                     _ => false,
                 }
@@ -645,14 +651,14 @@ fn is_date_typed(e: &Expr, date: &Key, vars: &HashSet<Key>) -> bool {
     }
 }
 
-fn collect_date_vars(module: &Module, date: &Key) -> HashSet<Key> {
+fn collect_date_vars(module: &Module, date: &Key, names: &vocab::Date) -> HashSet<Key> {
     let mut scan = VarScan { decls: Vec::new() };
     module.visit_with(&mut scan);
     let mut vars = HashSet::new();
     loop {
         let mut changed = false;
         for (k, init) in &scan.decls {
-            if !vars.contains(k) && is_date_typed(init, date, &vars) {
+            if !vars.contains(k) && is_date_typed(init, date, names, &vars) {
                 vars.insert(k.clone());
                 changed = true;
             }
@@ -664,10 +670,10 @@ fn collect_date_vars(module: &Module, date: &Key) -> HashSet<Key> {
     vars
 }
 
-/// Run date fusion over a module. Returns the number of chains fused.
-pub fn fuse_dates_module(module: &mut Module, ctx: &DateCtx) -> usize {
-    let date_vars = collect_date_vars(module, &ctx.date);
-    let mut f = DateFuser { ctx, date_vars, fused: 0 };
+/// Run date fusion over a module (`names`: the date vocabulary). Returns the number of chains fused.
+pub fn fuse_dates_module(module: &mut Module, ctx: &DateCtx, names: &vocab::Date) -> usize {
+    let date_vars = collect_date_vars(module, &ctx.date, names);
+    let mut f = DateFuser { ctx, names, date_vars, fused: 0 };
     module.visit_mut_with(&mut f);
     f.fused
 }

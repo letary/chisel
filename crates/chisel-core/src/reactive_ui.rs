@@ -28,35 +28,29 @@ use swc_core::common::{Spanned, SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-/// Container factories whose function-valued children argument is a reactive children binding.
-const CONTAINER_FACTORIES: &[&str] = &[
-    "UIColumn", "UIRow", "UIBox", "UIButton", "UIScrollable", "UIScreen", "UIWidget",
-];
-/// Text factory: the (last) text argument is a binding position.
-const TEXT_FACTORY: &str = "UIText";
-/// Free calls that root the signal-type inference.
-const SIGNAL_FACTORIES: &[&str] = &["signal", "computed"];
-/// The SDK's memoized-map helper (an inject.ts export, referenced as a free global).
-const MAP_HELPER: &str = "__uiMap";
+use crate::vocab::{has, Signals, Ui};
 
-/// Apply the pass to one module. `unresolved_ctxt` is the module's free-reference context.
-pub fn apply(path: &str, unresolved_ctxt: SyntaxContext, module: &mut Module) {
+/// Apply the pass to one module. `unresolved_ctxt` is the module's free-reference context. The
+/// names it keys on — the container / text factories, the children setter, the binding methods,
+/// the map helper, the signal factories and their `.value` — are the SDK's vocabulary.
+pub fn apply(path: &str, unresolved_ctxt: SyntaxContext, module: &mut Module, ui: &Ui, signals: &Signals) {
     // Fixpoint: collect bindings initialized from `signal(...)` / `computed(...)` or aliases.
     let mut vars: HashSet<(Atom, SyntaxContext)> = HashSet::new();
     loop {
-        let mut collect = SignalCollect { unresolved: unresolved_ctxt, vars: &mut vars, changed: false };
+        let mut collect = SignalCollect { unresolved: unresolved_ctxt, signals, vars: &mut vars, changed: false };
         module.visit_with(&mut collect);
         if !collect.changed {
             break;
         }
     }
-    module.visit_mut_with(&mut ReactiveUi { path, unresolved: unresolved_ctxt, vars, in_children_fn: 0 });
+    module.visit_mut_with(&mut ReactiveUi { path, unresolved: unresolved_ctxt, ui, signals, vars, in_children_fn: 0 });
 }
 
 // ---- signal-type inference ----------------------------------------------------------------------
 
 struct SignalCollect<'a> {
     unresolved: SyntaxContext,
+    signals: &'a Signals,
     vars: &'a mut HashSet<(Atom, SyntaxContext)>,
     changed: bool,
 }
@@ -68,7 +62,7 @@ impl SignalCollect<'_> {
             Expr::Ident(id) => self.vars.contains(&(id.sym.clone(), id.ctxt)),
             Expr::Call(c) => match &c.callee {
                 Callee::Expr(callee) => match &**callee {
-                    Expr::Ident(id) => id.ctxt == self.unresolved && SIGNAL_FACTORIES.contains(&id.sym.as_str()),
+                    Expr::Ident(id) => id.ctxt == self.unresolved && has(&self.signals.factories, &id.sym),
                     _ => false,
                 },
                 _ => false,
@@ -96,6 +90,8 @@ impl Visit for SignalCollect<'_> {
 /// at the top level make the expression unwrappable (an arrow body can't host them).
 struct ReadsSignalValue<'a> {
     vars: &'a HashSet<(Atom, SyntaxContext)>,
+    /// The signal's read property (`value`).
+    value: &'a str,
     found: bool,
     blocked: bool,
 }
@@ -114,7 +110,7 @@ impl Visit for ReadsSignalValue<'_> {
     fn visit_member_expr(&mut self, m: &MemberExpr) {
         m.visit_children_with(self);
         if let MemberProp::Ident(p) = &m.prop {
-            if p.sym == "value" {
+            if p.sym == self.value {
                 if let Expr::Ident(obj) = &*m.obj {
                     if self.vars.contains(&(obj.sym.clone(), obj.ctxt)) {
                         self.found = true;
@@ -130,6 +126,8 @@ impl Visit for ReadsSignalValue<'_> {
 struct ReactiveUi<'a> {
     path: &'a str,
     unresolved: SyntaxContext,
+    ui: &'a Ui,
+    signals: &'a Signals,
     vars: HashSet<(Atom, SyntaxContext)>,
     /// Nesting depth of children-position closures (0 = not inside one).
     in_children_fn: usize,
@@ -144,11 +142,11 @@ impl ReactiveUi<'_> {
             return None;
         }
         let name = id.sym.as_str();
-        (CONTAINER_FACTORIES.contains(&name) || name == TEXT_FACTORY).then_some(name)
+        (has(&self.ui.containers, name) || name == self.ui.text).then_some(name)
     }
 
     fn reads_signal(&self, e: &Expr) -> bool {
-        let mut chk = ReadsSignalValue { vars: &self.vars, found: false, blocked: false };
+        let mut chk = ReadsSignalValue { vars: &self.vars, value: &self.signals.value, found: false, blocked: false };
         e.visit_with(&mut chk);
         chk.found && !chk.blocked
     }
@@ -211,7 +209,7 @@ impl ReactiveUi<'_> {
         *e = Expr::Call(CallExpr {
             span,
             ctxt: SyntaxContext::empty(),
-            callee: Callee::Expr(Box::new(Expr::Ident(Ident::new(Atom::from(MAP_HELPER), DUMMY_SP, self.unresolved)))),
+            callee: Callee::Expr(Box::new(Expr::Ident(Ident::new(Atom::from(self.ui.map_helper.as_str()), DUMMY_SP, self.unresolved)))),
             args: vec![
                 ExprOrSpread { spread: None, expr: m.obj },
                 render,
@@ -230,7 +228,7 @@ impl VisitMut for ReactiveUi<'_> {
         if let Expr::Call(call) = e {
             // A UI factory call: walk arguments with position awareness.
             if let Some(name) = self.free_factory(call) {
-                let is_text = name == TEXT_FACTORY;
+                let is_text = name == self.ui.text;
                 let argc = call.args.len();
                 for (i, arg) in call.args.iter_mut().enumerate() {
                     if arg.spread.is_some() {
@@ -261,7 +259,7 @@ impl VisitMut for ReactiveUi<'_> {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(m) = &**callee {
                     if let MemberProp::Ident(p) = &m.prop {
-                        if p.sym == "setContent"
+                        if p.sym == self.ui.set_content.as_str()
                             && call.args.len() == 1
                             && call.args[0].spread.is_none()
                             && matches!(&*call.args[0].expr, Expr::Arrow(_) | Expr::Fn(_))
@@ -275,7 +273,7 @@ impl VisitMut for ReactiveUi<'_> {
                         }
                         // `.class({...})` values are boolean | () => boolean — the same wrap rule
                         // as style values applies (the el.class proxy accepts both forms).
-                        if (p.sym == "style" || p.sym == "class") && call.args.len() == 1 && call.args[0].spread.is_none() {
+                        if has(&self.ui.binding_methods, &p.sym) && call.args.len() == 1 && call.args[0].spread.is_none() {
                             call.visit_mut_children_with(self);
                             if let Expr::Object(obj) = &mut *call.args[0].expr {
                                 self.wrap_style_object(obj);
