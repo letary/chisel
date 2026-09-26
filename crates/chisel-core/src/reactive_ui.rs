@@ -176,7 +176,7 @@ impl ReactiveUi<'_> {
     }
 
     /// Wrap reactive top-level property values of a style object literal. Nested objects
-    /// (`onPressed`, `$class` blocks) are left alone — the runtime only binds top-level values.
+    /// (`$pressed`, `$landscape`, any `$class` block) are left alone — the runtime only binds top-level values.
     fn wrap_style_object(&self, obj: &mut ObjectLit) {
         for prop in &mut obj.props {
             if let PropOrSpread::Prop(p) = prop {
