@@ -60,10 +60,11 @@ const NODE_FACTORIES: &[&str] = &[
 /// Builder methods that return the node (`this`) — a chain rooted at a node factory stays a node.
 /// Conservative whitelist: an unlisted method (e.g. `getBoundingClientRect`) blocks provability.
 const CHAIN_METHODS: &[&str] = &[
-    "style", "animateTo", "animateFrom", "class",
-    "onClick", "onTouchStart", "onLongPress", "onLayout", "onOpen", "onClose", "onBackPressed",
-    "onScroll", "onScrollRelease", "onOverscroll", "onRefresh", "onInput", "onSubmit",
-    "onSelect", "onChange", "onOverlayTap",
+    "style", "animateTo", "animateFrom", "class", "named",
+    "onClick", "onTouchStart", "onLongPress", "onMouseEnter", "onLayout", "onOpen", "onClose", "onBack",
+    "onScroll", "onScrollRelease", "onOverscroll", "onRefresh", "onSubmit",
+    "onSelect", "onChange", "onFocus", "onBlur", "onOverlayTap", "onDetent",
+    "onEndReached", "onStartReached",
     "append", "insert", "remove", "setContent", "keepAlive",
 ];
 
