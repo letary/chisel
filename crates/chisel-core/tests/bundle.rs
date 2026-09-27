@@ -911,3 +911,68 @@ fn m11_component_write_is_off_without_sdk_helpers() {
     assert!(code.contains("c.velocity.y = 7"), "older SDK: bundled exactly as written:\n{code}");
     assert!(!code.contains("__compWrite("), "no dangling helper reference:\n{code}");
 }
+
+// ---- M12: object facades — an object literal's properties are members ---------------------------
+
+const FACADE_SDK: &str = "import { fuse } from './motion'\nexport const device = {\n  get language(): string { return 'ru' },\n  get width(): number { return 320 },\n  motion: { start(): number { return fuse() }, get attitude(): number { return fuse() * 2 } },\n  vibrate(): void { console.log('bzz') },\n  get strength(): number { return this.width },\n  set strength(v: number) { console.log(v) },\n}";
+const MOTION_SDK: &str = "export function fuse(): number { return 42 }";
+
+fn facade(main: &str) -> String {
+    ok_inject(
+        &[("/main.ts", main), ("/sdk/inject.ts", "export { device } from './device'"), ("/sdk/device.ts", FACADE_SDK), ("/sdk/motion.ts", MOTION_SDK)],
+        &["/sdk/inject.ts"],
+    )
+}
+
+#[test]
+fn m12_facade_properties_are_units() {
+    // `device.language` alone: no sensor api, no vibrate, no width — and nothing only they pulled.
+    let c = facade("console.log(device.language)");
+    assert!(c.contains("get language"), "the read property survives:\n{c}");
+    assert!(!c.contains("motion"), "an unread nested api is dropped:\n{c}");
+    assert!(!c.contains("function fuse"), "…and what only it referenced:\n{c}");
+    assert!(!c.contains("vibrate"), "an unread method is dropped:\n{c}");
+    assert!(!c.contains("get width"), "an unread getter is dropped:\n{c}");
+}
+
+#[test]
+fn m12_facade_this_and_accessor_pairs() {
+    let c = facade("device.strength = 2");
+    assert!(c.contains("set strength") && c.contains("get strength"), "a getter + setter pair is one member:\n{c}");
+    assert!(c.contains("get width"), "`this.width` inside a kept member keeps `width` (name presence):\n{c}");
+    assert!(!c.contains("motion"), "still no motion:\n{c}");
+}
+
+#[test]
+fn m12_facade_escapes_keep_it_whole() {
+    for main in [
+        "console.log(Object.keys(device))",
+        "console.log(device['lang' + 'uage'])",
+        "console.log(device.nope)",
+        "const d = device\nconsole.log(d.language)",
+    ] {
+        let c = facade(main);
+        assert!(c.contains("motion") && c.contains("vibrate") && c.contains("function fuse"), "{main}: must keep every property:\n{c}");
+    }
+}
+
+#[test]
+fn m12_facade_in_user_code_and_class_name_presence() {
+    // A user facade gets the same treatment, and a property read on a facade still counts as name
+    // presence for same-named class instance members — the class rule is unchanged.
+    let c = ok(&[(
+        "/main.ts",
+        "class K { language(): string { return 'k' }\n  other(): string { return 'o' } }\nconst api = { language(): string { return 'a' }, other(): string { return 'b' } }\nconsole.log(api.language(), new K())",
+    )]);
+    assert!(c.contains("return 'a'"), "the read user property survives:\n{c}");
+    assert!(!c.contains("return 'b'"), "an unread user property is dropped:\n{c}");
+    assert!(c.contains("return 'k'"), "a class method named by the facade read stays live:\n{c}");
+    assert!(!c.contains("return 'o'"), "an unread class method is still dropped:\n{c}");
+}
+
+#[test]
+fn m12_facade_with_impure_value_or_spread_stays_whole() {
+    let c = ok(&[("/main.ts", "const cfg = { a: Date.now(), b(): number { return 1 } }\nconst more = { ...cfg, c: 2 }\nconsole.log(cfg.b(), more.c)")]);
+    assert!(c.contains("Date.now()"), "a literal with an impure value is not split:\n{c}");
+    assert!(c.contains("...cfg"), "a literal with a spread is not split:\n{c}");
+}
