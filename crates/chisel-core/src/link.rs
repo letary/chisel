@@ -12,7 +12,10 @@
 //! instance *setter* somewhere (`Object.assign(inst, { friction })` / `node.aspect(Physics,
 //! { friction })` write through it — without this the accessor pair vanished and the write became
 //! a silent own property). So an unused `Mesh.sphere`, an unused `Vec3.reflect`, and
-//! everything only they pulled in all fall away. User modules get the *same* demand-driven DCE — an
+//! everything only they pulled in all fall away. An *object facade* — `const X = { … }` of pure
+//! properties (`device`, `app`, `Color`) — is split the same way: one unit per property, pulled by
+//! `X.name` and by name presence, so `device.language` alone carries no `motion`; any other use of
+//! `X` (a bare value, a computed or unknown member) keeps it whole. User modules get the *same* demand-driven DCE — an
 //! unused pure declaration / unused export is dropped, its own class members are method-DCE'd — with
 //! one difference: a **side-effecting** top-level statement in user code is a root (always kept and
 //! emitted), whereas in the SDK (`sideEffects: false`) it is dropped — *unless* it mutates one of
@@ -96,6 +99,8 @@ enum Edge {
     Static(Key, Atom),    // `C.name` — a static member
     Instance(Atom),       // `obj.name` on a non-class object — marks the instance-method name live
     AllInstance,          // `obj[expr]` — dynamic access keeps all instance methods
+    ObjMember(Key, Atom), // `X.name` on an object facade — that property
+    ObjEscape(Key),       // any other use of a facade (bare value, computed / unknown member, `new`) — whole
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -104,6 +109,7 @@ enum Unit {
     Core(Key),
     Static(Key, Atom),
     Instance(Key, Atom),
+    ObjMember(Key, Atom),
 }
 
 enum Task {
@@ -117,6 +123,8 @@ struct Collector<'a> {
     binding_keys: &'a HashSet<Key>,
     /// Every name that is an instance **setter** on some class (see `visit_prop`).
     setter_names: &'a HashSet<Atom>,
+    /// The object facades (see `facade_of`) and their property names.
+    obj_members: &'a HashMap<Key, Vec<Atom>>,
     out: Vec<Edge>,
 }
 
@@ -125,6 +133,8 @@ impl Visit for Collector<'_> {
         let k = (id.sym.clone(), id.ctxt);
         if self.class_keys.contains(&k) {
             self.out.push(Edge::Escape(k));
+        } else if self.obj_members.contains_key(&k) {
+            self.out.push(Edge::ObjEscape(k));
         } else if self.binding_keys.contains(&k) {
             self.out.push(Edge::Decl(k));
         }
@@ -133,7 +143,11 @@ impl Visit for Collector<'_> {
     fn visit_new_expr(&mut self, n: &NewExpr) {
         if let Expr::Ident(callee) = &*n.callee {
             let k = (callee.sym.clone(), callee.ctxt);
-            if self.class_keys.contains(&k) {
+            if self.obj_members.contains_key(&k) {
+                self.out.push(Edge::ObjEscape(k));
+                visit_args(self, &n.args);
+                return;
+            } else if self.class_keys.contains(&k) {
                 self.out.push(Edge::Core(k));
                 visit_args(self, &n.args);
                 return;
@@ -157,6 +171,31 @@ impl Visit for Collector<'_> {
                         c.expr.visit_with(self);
                     }
                     MemberProp::PrivateName(_) => self.out.push(Edge::Escape(k)),
+                }
+                return;
+            }
+            if let Some(members) = self.obj_members.get(&k) {
+                let name = match &m.prop {
+                    MemberProp::Ident(name) => Some(name.sym.clone()),
+                    MemberProp::Computed(c) => match &*c.expr {
+                        Expr::Lit(Lit::Str(s)) => Some(Atom::from(s.value.as_str().unwrap_or(""))),
+                        other => {
+                            other.visit_with(self);
+                            None
+                        }
+                    },
+                    MemberProp::PrivateName(_) => None,
+                };
+                match name {
+                    // The property itself — and its name as presence, so a same-named class
+                    // instance member stays live exactly as before facades were split.
+                    Some(name) if members.contains(&name) => {
+                        self.out.push(Edge::ObjMember(k, name.clone()));
+                        self.out.push(Edge::Instance(name));
+                    }
+                    // A name the literal does not declare (`X.hasOwnProperty`, a property attached by
+                    // a later `X.y = …`) or a dynamic key: nothing can be proved → keep it whole.
+                    _ => self.out.push(Edge::ObjEscape(k)),
                 }
                 return;
             }
@@ -241,10 +280,48 @@ fn edges_of(
     class_keys: &HashSet<Key>,
     binding_keys: &HashSet<Key>,
     setter_names: &HashSet<Atom>,
+    obj_members: &HashMap<Key, Vec<Atom>>,
 ) -> Vec<Edge> {
-    let mut c = Collector { class_keys, binding_keys, setter_names, out: Vec::new() };
+    let mut c = Collector { class_keys, binding_keys, setter_names, obj_members, out: Vec::new() };
     node_visit(&mut c);
     c.out
+}
+
+/// An *object facade*: `const X = { … }` — one declarator, an object literal with no spread whose
+/// every property has a literal name and a pure value (a method, an accessor, a literal, an
+/// identifier, an arrow, a nested pure object). Its properties become reachability units of their
+/// own (`Unit::ObjMember`), pulled the way a class's instance members are: by `X.name` and by name
+/// presence (`this.name`, destructuring). A getter + setter pair is one unit. Anything else that
+/// touches `X` — a bare value (`Object.keys(X)`, `{ ...X }`, passing it on), a computed or unknown
+/// member, `new X` — keeps it whole.
+fn facade_of(decl: &Decl, ctxt: SyntaxContext) -> Option<(Key, Vec<Atom>)> {
+    let Decl::Var(v) = decl else { return None };
+    if v.decls.len() != 1 {
+        return None;
+    }
+    let d = &v.decls[0];
+    let Pat::Ident(b) = &d.name else { return None };
+    let Expr::Object(obj) = unparen(d.init.as_deref()?) else { return None };
+    let names = facade_members(obj)?;
+    if names.is_empty() {
+        return None;
+    }
+    Some(((b.id.sym.clone(), ctxt), names))
+}
+
+fn facade_members(obj: &ObjectLit) -> Option<Vec<Atom>> {
+    let mut names: Vec<Atom> = Vec::new();
+    for p in &obj.props {
+        let PropOrSpread::Prop(prop) = p else { return None };
+        if !prop_is_pure(prop) {
+            return None;
+        }
+        let name = prop_key_name(prop)?;
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Some(names)
 }
 
 fn simple_prop_name(p: &PropName) -> Option<Atom> {
@@ -594,12 +671,21 @@ pub fn link(
     let mut classes_with_instance: HashMap<Atom, Vec<Key>> = HashMap::new();
     // Instance setter names across all classes — the only member kind an object-literal key can reach.
     let mut setter_names: HashSet<Atom> = HashSet::new();
+    // Object facades (`facade_of`): their property names, and the facades declaring each name.
+    let mut obj_members: HashMap<Key, Vec<Atom>> = HashMap::new();
+    let mut objects_with_member: HashMap<Atom, Vec<Key>> = HashMap::new();
     for m in &graph.modules {
         let ctxt = m.top_level_ctxt;
         for item in &m.module.body {
             if let Some(decl) = item_decl(item) {
                 for k in binding_keys_of_decl(decl, ctxt) {
                     binding_keys.insert(k);
+                }
+                if let Some((key, names)) = facade_of(decl, ctxt) {
+                    for name in &names {
+                        objects_with_member.entry(name.clone()).or_default().push(key.clone());
+                    }
+                    obj_members.insert(key, names);
                 }
                 if let Decl::Class(cd) = decl {
                     let key = (cd.ident.sym.clone(), ctxt);
@@ -643,12 +729,12 @@ pub fn link(
                 ItemKind::Drop => continue,
                 // A user side effect must run → its references are reachability roots.
                 ItemKind::SideEffect => {
-                    roots.extend(edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names));
+                    roots.extend(edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members));
                 }
                 // Not a root: it only runs if its anchor survives, so its refs are held back until
                 // then — otherwise attaching a statement would drag its whole reference set in.
                 ItemKind::AttachedTo(anchor) => {
-                    let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names);
+                    let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members);
                     pending.entry(anchor).or_default().extend(e);
                 }
                 // A pure decl becomes unit(s); its references are pulled only if the unit is reached.
@@ -657,13 +743,13 @@ pub fn link(
                         let key = (cd.ident.sym.clone(), ctxt);
                         let mut core = Vec::new();
                         if let Some(sc) = &cd.class.super_class {
-                            core.extend(edges_of(|c| sc.visit_with(c), &class_keys, &binding_keys, &setter_names));
+                            core.extend(edges_of(|c| sc.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members));
                         }
                         for mem in &cd.class.body {
                             match method_name(mem) {
                                 Some((name, is_static)) => {
                                     if let ClassMember::Method(mm) = mem {
-                                        let e = edges_of(|c| mm.function.visit_with(c), &class_keys, &binding_keys, &setter_names);
+                                        let e = edges_of(|c| mm.function.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members);
                                         let unit = if is_static {
                                             Unit::Static(key.clone(), name)
                                         } else {
@@ -672,17 +758,34 @@ pub fn link(
                                         unit_edges.entry(unit).or_default().extend(e);
                                     }
                                 }
-                                None => core.extend(edges_of(|c| mem.visit_with(c), &class_keys, &binding_keys, &setter_names)),
+                                None => core.extend(edges_of(|c| mem.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members)),
                             }
                         }
                         unit_edges.entry(Unit::Core(key)).or_default().extend(core);
                     }
-                    Some(d) => {
-                        let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names);
-                        for k in binding_keys_of_decl(d, ctxt) {
-                            unit_edges.entry(Unit::Decl(k)).or_default().extend(e.clone());
+                    Some(d) => match facade_of(d, ctxt) {
+                        // A facade: the declaration itself owes nothing, each property is a unit.
+                        Some((key, _)) => {
+                            unit_edges.entry(Unit::Decl(key.clone())).or_default();
+                            let Decl::Var(v) = d else { unreachable!() };
+                            if let Some(Expr::Object(obj)) = v.decls[0].init.as_deref().map(unparen) {
+                                for p in &obj.props {
+                                    if let PropOrSpread::Prop(prop) = p {
+                                        if let Some(name) = prop_key_name(prop) {
+                                            let e = edges_of(|c| prop.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members);
+                                            unit_edges.entry(Unit::ObjMember(key.clone(), name)).or_default().extend(e);
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    }
+                        None => {
+                            let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members);
+                            for k in binding_keys_of_decl(d, ctxt) {
+                                unit_edges.entry(Unit::Decl(k)).or_default().extend(e.clone());
+                            }
+                        }
+                    },
                     None => {}
                 },
             }
@@ -695,7 +798,7 @@ pub fn link(
     let mut all_instance = false;
     let mut work: Vec<Task> = Vec::new();
     for e in &roots {
-        edge_task(e, &class_statics, &mut work);
+        edge_task(e, &class_statics, &obj_members, &mut work);
     }
     // `keep` — method names the host calls by name (no in-bundle caller), so presence-gating can't
     // see them. Mark them live so any *reached* class that has them retains them (unreached classes
@@ -725,6 +828,7 @@ pub fn link(
                 }
                 match &u {
                     Unit::Static(k, _) | Unit::Instance(k, _) => work.push(Task::Reach(Unit::Core(k.clone()))),
+                    Unit::ObjMember(k, _) => work.push(Task::Reach(Unit::Decl(k.clone()))),
                     Unit::Core(k) => {
                         if let Some(names) = class_instance.get(k) {
                             for name in names {
@@ -734,20 +838,29 @@ pub fn link(
                             }
                         }
                     }
-                    Unit::Decl(_) => {}
+                    // A facade going live brings the properties whose names are already live.
+                    Unit::Decl(k) => {
+                        if let Some(names) = obj_members.get(k) {
+                            for name in names {
+                                if all_instance || live.contains(name) {
+                                    work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone())));
+                                }
+                            }
+                        }
+                    }
                 }
                 // A binding going live pulls the top-level statements that mutate it (and, only
                 // now, whatever those statements reference).
                 if let Unit::Decl(k) | Unit::Core(k) = &u {
                     if let Some(edges) = pending.remove(k) {
                         for e in &edges {
-                            edge_task(e, &class_statics, &mut work);
+                            edge_task(e, &class_statics, &obj_members, &mut work);
                         }
                     }
                 }
                 if let Some(edges) = unit_edges.get(&u) {
                     for e in edges.clone() {
-                        edge_task(&e, &class_statics, &mut work);
+                        edge_task(&e, &class_statics, &obj_members, &mut work);
                     }
                 }
             }
@@ -762,6 +875,13 @@ pub fn link(
                         }
                     }
                 }
+                if let Some(objs) = objects_with_member.get(&name) {
+                    for k in objs {
+                        if reached.contains(&Unit::Decl(k.clone())) {
+                            work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone())));
+                        }
+                    }
+                }
             }
             Task::AllLive => {
                 if all_instance {
@@ -772,6 +892,13 @@ pub fn link(
                     if reached.contains(&Unit::Core(k.clone())) {
                         for name in names {
                             work.push(Task::Reach(Unit::Instance(k.clone(), name.clone())));
+                        }
+                    }
+                }
+                for (k, names) in &obj_members {
+                    if reached.contains(&Unit::Decl(k.clone())) {
+                        for name in names {
+                            work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone())));
                         }
                     }
                 }
@@ -832,7 +959,10 @@ pub fn link(
                     Some(d) => {
                         let present = binding_keys_of_decl(d, ctxt).iter().any(|k| reached.contains(&Unit::Decl(k.clone())));
                         if present {
-                            body.push(unwrap_export(item));
+                            body.push(match facade_of(d, ctxt) {
+                                Some((key, _)) => emit_facade(item, &key, &reached),
+                                None => unwrap_export(item),
+                            });
                         }
                     }
                     None => {}
@@ -850,8 +980,17 @@ pub fn link(
     })
 }
 
-fn edge_task(e: &Edge, class_statics: &HashMap<Key, HashSet<Atom>>, work: &mut Vec<Task>) {
+fn edge_task(e: &Edge, class_statics: &HashMap<Key, HashSet<Atom>>, obj_members: &HashMap<Key, Vec<Atom>>, work: &mut Vec<Task>) {
     match e {
+        Edge::ObjMember(k, name) => work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone()))),
+        Edge::ObjEscape(k) => {
+            work.push(Task::Reach(Unit::Decl(k.clone())));
+            if let Some(names) = obj_members.get(k) {
+                for name in names {
+                    work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone())));
+                }
+            }
+        }
         Edge::Decl(k) => work.push(Task::Reach(Unit::Decl(k.clone()))),
         Edge::Core(k) => work.push(Task::Reach(Unit::Core(k.clone()))),
         Edge::Escape(k) => {
@@ -921,6 +1060,34 @@ fn emit_class(item: &ModuleItem, key: &Key, reached: &HashSet<Unit>) -> ModuleIt
         });
     }
     ModuleItem::Stmt(Stmt::Decl(decl))
+}
+
+/// Emit an object facade keeping the properties whose units survived (a getter + setter pair
+/// shares one unit, so both halves stay or go together).
+fn emit_facade(item: &ModuleItem, key: &Key, reached: &HashSet<Unit>) -> ModuleItem {
+    let mut decl = match item {
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(e)) => e.decl.clone(),
+        ModuleItem::Stmt(Stmt::Decl(d)) => d.clone(),
+        _ => unreachable!(),
+    };
+    if let Decl::Var(v) = &mut decl {
+        if let Some(init) = v.decls[0].init.as_deref_mut() {
+            if let Expr::Object(obj) = unparen_mut(init) {
+                obj.props.retain(|p| match p {
+                    PropOrSpread::Prop(prop) => prop_key_name(prop).map_or(true, |n| reached.contains(&Unit::ObjMember(key.clone(), n))),
+                    PropOrSpread::Spread(_) => true,
+                });
+            }
+        }
+    }
+    ModuleItem::Stmt(Stmt::Decl(decl))
+}
+
+fn unparen_mut(e: &mut Expr) -> &mut Expr {
+    match e {
+        Expr::Paren(p) => unparen_mut(&mut p.expr),
+        other => other,
+    }
 }
 
 /// A binding is live if its decl unit is reached — or, for a class, its core.
