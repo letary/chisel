@@ -1,5 +1,7 @@
 # chisel
 
+[![npm version](https://img.shields.io/npm/v/%40letary%2Fchisel)](https://www.npmjs.com/package/@letary/chisel)
+
 A small, purpose-built bundler in **Rust** (built on [SWC](https://swc.rs)) for TypeScript projects
 that deliver an "SDK" of classes as injected globals (the esbuild `inject:` pattern). It does two
 things general bundlers (esbuild, Rollup, Rolldown) structurally can't:
