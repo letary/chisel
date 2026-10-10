@@ -147,13 +147,16 @@ impl Default for Ui {
 pub struct Signals {
     /// Free calls that root the inference (`signal(…)`, `computed(…)`).
     pub factories: Vec<String>,
+    /// Methods of a signal that return it (`signal(0).stored("key")`): a call of one on a signal
+    /// expression is a signal expression.
+    pub chain: Vec<String>,
     /// The property a signal read goes through (`s.value`).
     pub value: String,
 }
 
 impl Default for Signals {
     fn default() -> Self {
-        Signals { factories: strings(&["signal", "computed"]), value: "value".into() }
+        Signals { factories: strings(&["signal", "computed"]), chain: vec![], value: "value".into() }
     }
 }
 
