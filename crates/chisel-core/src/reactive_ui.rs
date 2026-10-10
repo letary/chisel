@@ -14,7 +14,8 @@
 //!    style-class batch form `.class({...})`), that reads `.value` of a signal-typed binding is
 //!    wrapped in `() => expr`, turning it into a reactive binding. The SDK APIs accept both forms,
 //!    so the wrap is type- and behavior-transparent for non-reactive code. Signal-typed bindings
-//!    are found by a fixpoint rooted at free calls to `signal(…)` / `computed(…)` (mirroring
+//!    are found by a fixpoint rooted at free calls to `signal(…)` / `computed(…)`, through the
+//!    chain methods that return the signal (`signal(0).stored("key")`) and aliases (mirroring
 //!    fusion's Vec3 local inference).
 //!
 //! Both rewrites are safe to over-apply: `__uiMap` degrades to `Array.prototype.map` outside a
@@ -63,6 +64,11 @@ impl SignalCollect<'_> {
             Expr::Call(c) => match &c.callee {
                 Callee::Expr(callee) => match &**callee {
                     Expr::Ident(id) => id.ctxt == self.unresolved && has(&self.signals.factories, &id.sym),
+                    // `signal(0).stored("key")`: a chain method that returns the signal
+                    Expr::Member(m) => match &m.prop {
+                        MemberProp::Ident(p) => has(&self.signals.chain, &p.sym) && self.is_signal_expr(&m.obj),
+                        _ => false,
+                    },
                     _ => false,
                 },
                 _ => false,

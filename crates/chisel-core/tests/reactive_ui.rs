@@ -108,6 +108,19 @@ fn signal_alias_is_inferred_via_fixpoint() {
 }
 
 #[test]
+fn signal_chain_method_is_inferred() {
+    // `signal(0).stored('count')` answers the signal (the vocabulary's `signals.chain`): the binding is a signal
+    let code = run(
+        "const count = signal(0).stored('count')
+const label = UIText('Count: ' + count.value)
+console.log(label)",
+        true,
+    );
+    assert!(has(&code, "UIText(()=>'Count: '+count.value)"), "chained signal read not wrapped:
+{code}");
+}
+
+#[test]
 fn style_object_values_are_wrapped_per_property() {
     let code = run(
         "const on = signal(false)\nconst t = UIText({ opacity: on.value ? 1 : 0.5, color: 'red' }, 'x')\nt && (t as any).style({ fontSize: on.value ? 20 : 14 })\nconsole.log(t)",
