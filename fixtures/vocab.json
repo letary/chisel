@@ -35,7 +35,9 @@
       "NativeView",
       "CameraView",
       "MapView",
-      "QRScanner"
+      "QRScanner",
+      "WebView",
+      "RTCVideoView"
     ],
     "containers": [
       "UIColumn",
@@ -51,6 +53,7 @@
       "style",
       "class",
       "named",
+      "theme",
       "onClick",
       "onTouchStart",
       "onLongPress",
@@ -76,8 +79,9 @@
       "insert",
       "remove",
       "setContent",
+      "widgets",
       "keepAlive",
-      "attachTo",
+      "url",
       "detents",
       "dismissible",
       "transition",

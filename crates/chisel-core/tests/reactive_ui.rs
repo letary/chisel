@@ -18,8 +18,15 @@ export const __uiMap = (list: any[], fn: any, slot: string) => list.map(fn)
 "#;
 
 fn run(main: &str, reactive_ui: bool) -> String {
+    run_files(&[("/main.ts", main)], reactive_ui)
+}
+
+/// A project of several modules (`/main.ts` is the entry).
+fn run_files(project: &[(&str, &str)], reactive_ui: bool) -> String {
     let mut files = HashMap::new();
-    files.insert("/main.ts".to_string(), main.to_string());
+    for (path, src) in project {
+        files.insert(path.to_string(), src.to_string());
+    }
     files.insert("/sdk/inject.ts".to_string(), SDK.to_string());
     let out = bundle(Input {
         files,
@@ -187,4 +194,59 @@ fn sdk_internal_map_calls_are_inert() {
     // exactly one rewrite (user code), and the SDK helper's own `.map` survives
     assert_eq!(squish(&code).matches("__uiMap(").count() >= 1, true);
     assert!(has(&code, "list.map(fn)"), "SDK-internal map was rewritten:\n{code}");
+}
+
+// ---- signals across modules ----------------------------------------------------------------------
+
+#[test]
+fn a_signal_imported_from_another_module_is_wrapped() {
+    let code = run_files(
+        &[
+            ("/store.ts", "export const count = signal(0)\nexport const label = 'n'"),
+            ("/main.ts", "import { count, label } from './store'\nconst t = UIText(`${label} ${count.value}`)\nconsole.log(t)"),
+        ],
+        true,
+    );
+    assert!(has(&code, "UIText(() => `${label} ${count.value}`)"), "imported signal not wrapped:\n{code}");
+}
+
+#[test]
+fn a_signal_through_a_re_export_hub_and_an_alias_is_wrapped() {
+    let code = run_files(
+        &[
+            ("/state/count.ts", "export const count = signal(0)"),
+            ("/state/index.ts", "export { count as total } from './count'\nexport * from './count'"),
+            ("/main.ts", "import { total } from './state'\nconst mine = total\nconst t = UIText(`${mine.value}`)\nconst s = UIText(`${total.value}`)\nconsole.log(t, s)"),
+        ],
+        true,
+    );
+    assert!(has(&code, "UIText(() => `${mine.value}`)"), "alias of a re-exported signal not wrapped:\n{code}");
+    // the linker names the re-exported binding by its origin (`count`): both texts are wrapped
+    assert_eq!(squish(&code).matches("UIText(()=>").count(), 2, "re-exported signal not wrapped:
+{code}");
+}
+
+#[test]
+fn an_exported_alias_of_an_imported_signal_reaches_a_third_module() {
+    let code = run_files(
+        &[
+            ("/a.ts", "export const n = signal(1)"),
+            ("/b.ts", "import { n } from './a'\nexport const m = n"),
+            ("/main.ts", "import { m } from './b'\nconst t = UIText(`${m.value}`)\nconsole.log(t)"),
+        ],
+        true,
+    );
+    assert!(has(&code, "UIText(() => `${m.value}`)"), "signal through two modules not wrapped:\n{code}");
+}
+
+#[test]
+fn an_imported_non_signal_is_left_alone() {
+    let code = run_files(
+        &[
+            ("/store.ts", "export const user = { value: 'x' }"),
+            ("/main.ts", "import { user } from './store'\nconst t = UIText(`${user.value}`)\nconsole.log(t)"),
+        ],
+        true,
+    );
+    assert!(!has(&code, "UIText(() =>"), "a plain object read was wrapped:\n{code}");
 }

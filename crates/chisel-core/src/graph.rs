@@ -376,17 +376,6 @@ pub fn build(
                 module.visit_mut_with(&mut ConstFold);
             }
         }
-        // Reactive-UI desugaring (memoized children maps + auto-wrapped signal reads). Keys on
-        // free (unresolved) references to the injected globals, so SDK modules are inert.
-        if reactive_ui {
-            reactive_ui::apply(&path, unresolved_ctxt, &mut module, &vocab.ui, &vocab.signals);
-        }
-        // Flatten literal array args of UI factory calls into variadic args (the runtime flattens
-        // array arguments one level either way; this saves an allocation per call site). Runs
-        // after reactive_ui so its position-based decisions see the original call shapes.
-        if flatten_ui {
-            flatten_ui::apply(unresolved_ctxt, &mut module, &vocab.ui);
-        }
 
         let mut imports: Vec<(String, Vec<ImportSpec>)> = Vec::new();
         let mut exports: HashMap<String, RawExport> = HashMap::new();
@@ -574,7 +563,24 @@ pub fn build(
         modules[i].imports = resolved;
     }
 
-    Ok(ModuleGraph { modules, path_to_id })
+    let mut graph = ModuleGraph { modules, path_to_id };
+
+    // Reactive-UI desugaring (memoized children maps + auto-wrapped signal reads), over the WHOLE
+    // graph: a signal imported from another module is a signal where it is read. Keys on free
+    // (unresolved) references to the injected globals, so SDK modules are inert.
+    if reactive_ui {
+        reactive_ui::apply_graph(&mut graph, &vocab.ui, &vocab.signals);
+    }
+    // Flatten literal array args of UI factory calls into variadic args (the runtime flattens
+    // array arguments one level either way; this saves an allocation per call site). Runs
+    // after reactive_ui so its position-based decisions see the original call shapes.
+    if flatten_ui {
+        for m in &mut graph.modules {
+            flatten_ui::apply(m.unresolved_ctxt, &mut m.module, &vocab.ui);
+        }
+    }
+
+    Ok(graph)
 }
 
 /// If `local` is an imported name in `m`, return its (target module id, imported name).

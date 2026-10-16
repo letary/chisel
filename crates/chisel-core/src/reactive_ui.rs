@@ -1,7 +1,7 @@
 //! Reactive-UI desugaring (`Input.reactive_ui`) — two source transforms for the SDK's signals
-//! feature, applied per module right after parse. Both key on *free* references to the SDK's
-//! injected globals (`unresolved_ctxt`), so SDK-internal code — which imports these names instead
-//! of referencing them as globals — is naturally untouched.
+//! feature, applied over the whole module graph once it is built. Both key on *free* references to
+//! the SDK's injected globals (`unresolved_ctxt`), so SDK-internal code — which imports these names
+//! instead of referencing them as globals — is naturally untouched.
 //!
 //! 1. **Memoized children maps.** `list.map(fn)` lexically inside a children-position closure of a
 //!    UI container factory (`UIColumn(() => …)`, `UIRow(style, () => …)`, `x.setContent(() => …)`)
@@ -16,7 +16,10 @@
 //!    so the wrap is type- and behavior-transparent for non-reactive code. Signal-typed bindings
 //!    are found by a fixpoint rooted at free calls to `signal(…)` / `computed(…)`, through the
 //!    chain methods that return the signal (`signal(0).stored("key")`) and aliases (mirroring
-//!    fusion's Vec3 local inference).
+//!    fusion's Vec3 local inference) — ACROSS MODULES: an imported binding whose origin (through
+//!    any re-export chain) is a signal binding is a signal here too. A `store.ts` of signals read
+//!    by the screens is the ordinary shape of an app; inferring per file left every such text
+//!    unwrapped and silently stale.
 //!
 //! Both rewrites are safe to over-apply: `__uiMap` degrades to `Array.prototype.map` outside a
 //! children binding / for non-element results, and a wrapped expression that never re-reads a
@@ -29,14 +32,56 @@ use swc_core::common::{Spanned, SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
+use crate::graph::{resolve_export, ModuleGraph, ModuleInfo};
 use crate::vocab::{has, Signals, Ui};
 
-/// Apply the pass to one module. `unresolved_ctxt` is the module's free-reference context. The
-/// names it keys on — the container / text factories, the children setter, the binding methods,
-/// the map helper, the signal factories and their `.value` — are the SDK's vocabulary.
-pub fn apply(path: &str, unresolved_ctxt: SyntaxContext, module: &mut Module, ui: &Ui, signals: &Signals) {
-    // Fixpoint: collect bindings initialized from `signal(...)` / `computed(...)` or aliases.
-    let mut vars: HashSet<(Atom, SyntaxContext)> = HashSet::new();
+/// A signal-typed binding: its name and the scope it is bound in.
+type Binding = (Atom, SyntaxContext);
+
+/// Apply the pass to every module of the graph. The names it keys on — the container / text
+/// factories, the children setter, the binding methods, the map helper, the signal factories and
+/// their `.value` — are the SDK's vocabulary.
+///
+/// Signal inference runs graph-wide to a fixpoint: a module's imported bindings whose origin (a
+/// real top-level binding, through re-exports) is a signal binding seed that module's own
+/// inference, and what it exports feeds the modules importing from it. The rewrite then runs per
+/// module with the bindings found.
+pub fn apply_graph(graph: &mut ModuleGraph, ui: &Ui, signals: &Signals) {
+    let n = graph.modules.len();
+    let imported: Vec<Vec<ImportedLocal>> = graph.modules.iter().map(imported_locals).collect();
+    let mut vars: Vec<HashSet<Binding>> = vec![HashSet::new(); n];
+    loop {
+        let mut changed = false;
+        for i in 0..n {
+            let m = &graph.modules[i];
+            let mut seeds = vars[i].clone();
+            for il in &imported[i] {
+                let Some((origin, local)) = resolve_export(graph, il.target, &il.imported) else { continue };
+                let origin_ctxt = graph.modules[origin].top_level_ctxt;
+                if vars[origin].contains(&(Atom::from(local.as_str()), origin_ctxt)) {
+                    seeds.insert((il.local.clone(), il.ctxt));
+                }
+            }
+            let found = collect(&m.module, m.unresolved_ctxt, signals, seeds);
+            if found != vars[i] {
+                vars[i] = found;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for (i, m) in graph.modules.iter_mut().enumerate() {
+        let vars = std::mem::take(&mut vars[i]);
+        m.module.visit_mut_with(&mut ReactiveUi { path: &m.path, unresolved: m.unresolved_ctxt, ui, signals, vars, in_children_fn: 0 });
+    }
+}
+
+/// Fixpoint over one module: the bindings initialized from `signal(...)` / `computed(...)`, a
+/// chain call on one, or an alias of one — starting from `seeds` (the imported signals).
+fn collect(module: &Module, unresolved_ctxt: SyntaxContext, signals: &Signals, seeds: HashSet<Binding>) -> HashSet<Binding> {
+    let mut vars = seeds;
     loop {
         let mut collect = SignalCollect { unresolved: unresolved_ctxt, signals, vars: &mut vars, changed: false };
         module.visit_with(&mut collect);
@@ -44,7 +89,41 @@ pub fn apply(path: &str, unresolved_ctxt: SyntaxContext, module: &mut Module, ui
             break;
         }
     }
-    module.visit_mut_with(&mut ReactiveUi { path, unresolved: unresolved_ctxt, ui, signals, vars, in_children_fn: 0 });
+    vars
+}
+
+/// A value import of a module: the local binding (with the scope the resolver gave it, read off
+/// the specifier itself) and where it comes from.
+struct ImportedLocal {
+    local: Atom,
+    ctxt: SyntaxContext,
+    target: usize,
+    imported: String,
+}
+
+fn imported_locals(m: &ModuleInfo) -> Vec<ImportedLocal> {
+    // local name → (target module, imported name), from the graph's resolved import edges
+    let mut origin: std::collections::HashMap<&str, (usize, &str)> = std::collections::HashMap::new();
+    for (tid, specs) in &m.imports {
+        for s in specs {
+            origin.insert(s.local.as_str(), (*tid, s.imported.as_str()));
+        }
+    }
+    let mut out = Vec::new();
+    for item in &m.module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(imp)) = item else { continue };
+        for spec in &imp.specifiers {
+            let local = match spec {
+                ImportSpecifier::Named(s) => &s.local,
+                ImportSpecifier::Default(d) => &d.local,
+                ImportSpecifier::Namespace(_) => continue, // `ns.count.value`: a member read, not inferred
+            };
+            if let Some((target, imported)) = origin.get(local.sym.as_str()) {
+                out.push(ImportedLocal { local: local.sym.clone(), ctxt: local.ctxt, target: *target, imported: (*imported).to_string() });
+            }
+        }
+    }
+    out
 }
 
 // ---- signal-type inference ----------------------------------------------------------------------
