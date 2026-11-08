@@ -573,7 +573,8 @@ pub fn build(
     }
     // Flatten literal array args of UI factory calls into variadic args (the runtime flattens
     // array arguments one level either way; this saves an allocation per call site). Runs
-    // after reactive_ui so its position-based decisions see the original call shapes.
+    // after reactive_ui so its position-based decisions see the original call shapes, and so the
+    // reactive text it makes of a container's signal-reading template child is raw-lowered too.
     if flatten_ui {
         for m in &mut graph.modules {
             flatten_ui::apply(m.unresolved_ctxt, &mut m.module, &vocab.ui);

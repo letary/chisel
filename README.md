@@ -113,7 +113,10 @@ assets, sourcemap, keep, reactive_ui, flatten_ui, vocab }`. Output: `{ code, map
   config object (`Object.assign(inst, { friction })`): an object-literal key that matches an
   instance setter keeps that accessor pair on its own.
 - `reactive_ui` — SDK signals desugaring: memoize `.map` inside children bindings (`__uiMap`) and
-  auto-wrap signal-reading text/style expressions in arrows. Keys on free references to the
+  auto-wrap signal-reading text/style expressions in arrows — every part of a `UIText` call
+  (``UIText("Total: ", `${t.value} ₽`)`` → `UIText("Total: ", () => …)`, a reactive run), and a
+  signal-reading template child of a container becomes a reactive text
+  (``UIColumn(`${n.value} items`)`` → `UIColumn(UIText(() => …))`). Keys on free references to the
   injected globals, so SDK-internal code is inert. Off by default.
 - `flatten_ui` — two rewrites over UI factory calls. (1) Splice literal array arguments into
   variadic arguments (`UIColumn([a, b])` → `UIColumn(a, b)`; the SDK runtime flattens array args
@@ -121,7 +124,9 @@ assets, sourcemap, keep, reactive_ui, flatten_ui, vocab }`. Output: `{ code, map
   array literals, function elements, and a leading object literal (the legacy style position) are
   left alone. (2) Raw-lower calls whose arguments are all *provably* plain children — known
   factory calls (incl. `.style()`/`.onClick()` builder chains), `const`s initialized from them
-  (fixpoint), falsy literals, `&&`/`?:` over those — to the SDK's dispatch-free builders:
+  (fixpoint), falsy literals, string / template literals (`UIButton("Pay")` →
+  `__UIButton(["Pay"])`: the raw builder's children path makes the string an anonymous text, as
+  the dispatch does), `&&`/`?:` over those — to the SDK's dispatch-free builders:
   `UIColumn(a, b)` → `__UIColumn([a, b])`, skipping the runtime style-probe + per-arg array scan
   entirely (and letting the unused dispatch machinery tree-shake away). The reactive form lowers
   too — a lone literal closure `UIColumn(() => […])` becomes `__UIColumn(() => […])` (the Element

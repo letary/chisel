@@ -9,11 +9,19 @@
 //!    so unchanged items keep their element identity across binding re-runs and the runtime
 //!    reconciler leaves them mounted. The slot string only needs to be unique within a bundle.
 //!
-//! 2. **Auto-wrapped reactive expressions.** A `UIText` text argument, or a top-level object
+//! 2. **Auto-wrapped reactive expressions.** A part of a `UIText` call, or a top-level object
 //!    property value in a binding-accepting call (factory style arg, `.style({...})`, or the
 //!    style-class batch form `.class({...})`), that reads `.value` of a signal-typed binding is
-//!    wrapped in `() => expr`, turning it into a reactive binding. The SDK APIs accept both forms,
-//!    so the wrap is type- and behavior-transparent for non-reactive code. Signal-typed bindings
+//!    wrapped in `() => expr`, turning it into a reactive binding. The parts of a text are its
+//!    arguments, at any arity, and the elements of a literal array argument (the SDK flattens one
+//!    level): ``UIText("Total: ", `${t.value} ₽`)`` → ``UIText("Total: ", () => `${t.value} ₽`)``, a
+//!    reactive anonymous run; a lone argument → `UIText(() => …)`, the text's own reactive string
+//!    (or parts). A part that reads no signal is left as written. A signal-reading template
+//!    literal among a CONTAINER's children (a direct argument or a literal array element) is a
+//!    string child — an anonymous text at run time, read once — so it becomes the reactive text
+//!    the author meant: ``UIColumn(`Total: ${t.value}`)`` → ``UIColumn(UIText(() => `Total: …`))``
+//!    (flatten_ui then raw-lowers the call). The SDK APIs accept both forms, so the wrap is type-
+//!    and behavior-transparent for non-reactive code. Signal-typed bindings
 //!    are found by a fixpoint rooted at free calls to `signal(…)` / `computed(…)`, through the
 //!    chain methods that return the signal (`signal(0).stored("key")`) and aliases (mirroring
 //!    fusion's Vec3 local inference) — ACROSS MODULES: an imported binding whose origin (through
@@ -23,7 +31,8 @@
 //!
 //! Both rewrites are safe to over-apply: `__uiMap` degrades to `Array.prototype.map` outside a
 //! children binding / for non-element results, and a wrapped expression that never re-reads a
-//! signal simply runs once.
+//! signal simply runs once. (A container's template child made a reactive text is a node even
+//! while its string is `""`, which the plain string child would have skipped.)
 
 use std::collections::HashSet;
 
@@ -258,6 +267,34 @@ impl ReactiveUi<'_> {
         });
     }
 
+    /// A part inside a literal array argument of a text: wrapped like an argument, but a nested
+    /// array is not a part (the SDK flattens one level — it is reported and skipped at run time).
+    fn wrap_part(&self, e: &mut Expr) {
+        if !matches!(e, Expr::Array(_)) {
+            self.wrap_if_reactive(e);
+        }
+    }
+
+    /// A container child that is a signal-reading template literal → ``UIText(() => `…`)``: at run
+    /// time the string would become an anonymous text holding the value read once (the SDK's
+    /// `toChild`), so it becomes the reactive text instead. Only a template literal is provably a
+    /// string; any other expression (`label`, `"a" + n.value`) may be an element and is left alone.
+    fn wrap_text_child(&self, e: &mut Expr) {
+        if !matches!(e, Expr::Tpl(_)) || !self.reads_signal(e) {
+            return;
+        }
+        let span = e.span();
+        let mut arg = std::mem::replace(e, Expr::Invalid(Invalid { span: DUMMY_SP }));
+        self.wrap_if_reactive(&mut arg);
+        *e = Expr::Call(CallExpr {
+            span,
+            ctxt: SyntaxContext::empty(),
+            callee: Callee::Expr(Box::new(Expr::Ident(Ident::new(Atom::from(self.ui.text.as_str()), DUMMY_SP, self.unresolved)))),
+            args: vec![ExprOrSpread { spread: None, expr: Box::new(arg) }],
+            type_args: None,
+        });
+    }
+
     /// Wrap reactive top-level property values of a style object literal. Nested objects
     /// (`$pressed`, `$landscape`, any `$class` block) are left alone — the runtime only binds top-level values.
     fn wrap_style_object(&self, obj: &mut ObjectLit) {
@@ -314,7 +351,6 @@ impl VisitMut for ReactiveUi<'_> {
             // A UI factory call: walk arguments with position awareness.
             if let Some(name) = self.free_factory(call) {
                 let is_text = name == self.ui.text;
-                let argc = call.args.len();
                 for (i, arg) in call.args.iter_mut().enumerate() {
                     if arg.spread.is_some() {
                         arg.expr.visit_mut_with(self);
@@ -329,12 +365,23 @@ impl VisitMut for ReactiveUi<'_> {
                         continue;
                     }
                     expr.visit_mut_with(self);
-                    if is_text && i + 1 == argc && i <= 1 {
-                        self.wrap_if_reactive(expr); // UIText text argument (last arg)
-                    } else if i == 0 {
-                        if let Expr::Object(obj) = expr {
-                            self.wrap_style_object(obj); // factory style argument
+                    match expr {
+                        // a leading style bag (the legacy `(style, …)` form): per-property bindings
+                        Expr::Object(obj) if i == 0 => self.wrap_style_object(obj),
+                        // a literal array: its elements are the call's parts / children (flattened)
+                        Expr::Array(arr) => {
+                            for el in arr.elems.iter_mut().flatten() {
+                                if el.spread.is_none() {
+                                    if is_text {
+                                        self.wrap_part(&mut el.expr);
+                                    } else {
+                                        self.wrap_text_child(&mut el.expr);
+                                    }
+                                }
+                            }
                         }
+                        _ if is_text => self.wrap_if_reactive(expr), // a text part
+                        _ => self.wrap_text_child(expr),
                     }
                 }
                 return;

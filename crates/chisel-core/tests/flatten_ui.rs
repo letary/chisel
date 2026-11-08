@@ -119,6 +119,73 @@ fn chained_builder_methods_stay_provable() {
     assert!(has(&code, "__UIColumn([UIText('a').style"), "chain not proven:\n{code}");
 }
 
+// ---- string children ----------------------------------------------------------------------------
+// A string child is an anonymous text (the SDK's `toChild`), mounted by the same `append` on the
+// raw path as on dispatch — so a string literal is a provable child and stays a string.
+
+#[test]
+fn string_literal_child_is_raw_lowered_as_a_string() {
+    let code = run("const c = UIColumn('Нажми')\nconsole.log(c)", true);
+    assert!(has(&code, "__UIColumn(['Нажми'])"), "string child not lowered:\n{code}");
+    let code = run("const c = UIColumn('строка', UIText('b'))\nconsole.log(c)", true);
+    assert!(has(&code, "__UIColumn(['строка', UIText('b')])"), "string beside a node not lowered:\n{code}");
+}
+
+#[test]
+fn template_literal_child_is_raw_lowered() {
+    let code = run("const n = Math.random()\nconst c = UIColumn(`n = ${n}`, UIText('x'))\nconsole.log(c)", true);
+    assert!(has(&code, "__UIColumn([`n = ${n}`, UIText('x')])"), "template child not lowered:\n{code}");
+}
+
+#[test]
+fn string_elements_of_a_literal_array_are_spliced_and_lowered() {
+    let code = run("const c = UIColumn(['a', UIText('b')], 'c')\nconsole.log(c)", true);
+    assert!(has(&code, "__UIColumn(['a', UIText('b'), 'c'])"), "array strings not lowered:\n{code}");
+}
+
+#[test]
+fn string_branches_of_conditionals_and_the_empty_string_are_provable() {
+    let code = run(
+        "const cond = Math.random() > 0.5\nconst c = UIColumn(cond ? 'a' : UIText('b'), cond && 'x', '')\nconsole.log(c)",
+        true,
+    );
+    assert!(has(&code, "__UIColumn([cond ? 'a' : UIText('b'), cond && 'x', ''])"), "not lowered:\n{code}");
+}
+
+#[test]
+fn strings_inside_a_text_are_untouched() {
+    // UIText is not a dispatch target here: its parts stay as written (the SDK's handling is the
+    // cheapest), and the container around it still lowers.
+    let code = run("const c = UIColumn(UIText('a', 'b'), UIText('c'))\nconsole.log(c)", true);
+    assert!(has(&code, "__UIColumn([UIText('a', 'b'), UIText('c')])"), "text parts touched:\n{code}");
+}
+
+#[test]
+fn non_literal_strings_stay_on_dispatch() {
+    // not provable: a parameter, a string const (a const is proven only as a node), a concatenation,
+    // a tagged template (whatever the tag returns)
+    let code = run(
+        "const tag = (s: any) => s\nconst k = 'x'\nfunction f(s: string) { return UIColumn(s) }\nconst a = UIColumn(k)\nconst b = UIColumn('n' + k)\nconst d = UIColumn(tag`x`)\nconsole.log(f('y'), a, b, d)",
+        true,
+    );
+    assert!(!has(&code, "__UIColumn"), "a non-literal was lowered:\n{code}");
+    assert!(has(&code, "UIColumn(s)") && has(&code, "UIColumn(k)") && has(&code, "UIColumn('n' + k)"), "call shape changed:\n{code}");
+}
+
+#[test]
+fn signal_reading_template_child_becomes_a_lowered_reactive_text() {
+    // reactive_ui (first) makes it `UIText(() => …)`, flatten_ui then raw-lowers the container
+    let code = run_full(
+        "const t = signal(1)\nconst c = UIColumn(`Total: ${t.value}`, 'static')\nconsole.log(c)",
+        true,
+        true,
+    );
+    assert!(has(&code, "__UIColumn([UIText(() => `Total: ${t.value}`), 'static'])"), "not composed:\n{code}");
+    // without reactive_ui the template is a plain string child (read once, as at run time)
+    let code = run("const t = signal(1)\nconst c = UIColumn(`Total: ${t.value}`)\nconsole.log(c)", true);
+    assert!(has(&code, "__UIColumn([`Total: ${t.value}`])"), "plain template changed:\n{code}");
+}
+
 // ---- dispatch fallbacks (still spliced where safe, but no raw lowering) -------------------------
 
 #[test]

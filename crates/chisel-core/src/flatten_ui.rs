@@ -14,7 +14,8 @@
 //! 2. **Raw lowering.** When *every* argument is provably a plain child — a call to a known
 //!    node-returning factory (possibly through a builder-method chain like `.style()`/`.onClick()`),
 //!    a `const` initialized from one (fixpoint, mirroring reactive_ui's signal inference), a falsy
-//!    literal, or `&&`/`?:`/parens over those — the call skips runtime dispatch entirely:
+//!    literal, a string or template literal, or `&&`/`?:`/parens over those — the call skips
+//!    runtime dispatch entirely:
 //!    `UIColumn(a, b)` → `__UIColumn([a, b])`, the SDK's dispatch-free construction path (an
 //!    inject export, like `__uiMap`). The array literal it introduces IS the children storage the
 //!    element keeps, so allocation count is unchanged — only the per-call dispatch (style probe,
@@ -23,6 +24,15 @@
 //!    branches on `typeof children === "function"` either way. Anything not provable — unknown
 //!    identifiers, a style object, a function behind an identifier — falls back to the
 //!    still-correct dispatch call.
+//!
+//!    A string child stays a string: `UIButton("Pay")` → `__UIButton(["Pay"])`. The raw builder
+//!    mounts its children through the same `append` as the dispatch, whose `toChild` makes a
+//!    string an anonymous text (`""` skipped) — so the string is handled exactly as on dispatch,
+//!    on every SDK version, the anonymous mark included (a later reactive `setContent` updates
+//!    that text in place). Rewriting it to `UIText("Pay")` would prove the call as well but make
+//!    the text a non-anonymous one. Only a LITERAL is proven: any other expression may be an array
+//!    or a function, which only the dispatch handles. A signal-reading template child becomes a
+//!    reactive `UIText(() => …)` in reactive_ui, which runs first.
 //!
 //! Requires an SDK with variadic factory dispatch + `__UI*` raw builders (shipped in lockstep by
 //! the CLI); the flag stays off by default. The factories, their raw builders, the other
@@ -84,6 +94,23 @@ fn is_node_expr(unresolved: SyntaxContext, ui: &Ui, vars: &HashSet<Key>, e: &Exp
             is_node_expr(unresolved, ui, vars, &c.cons) && is_node_expr(unresolved, ui, vars, &c.alt)
         }
         _ => false,
+    }
+}
+
+/// Is `e` provably a value the raw builder mounts exactly as the dispatch would — a node (see
+/// [`is_node_expr`]), or a string / template literal (never an array or a function: the children
+/// path's `toChild` turns it into an anonymous text either way), or `&&` / `?:` / parens over those?
+/// Strings are children, not nodes: a `const` bound to one does not join the node bindings (a
+/// builder chain on it is not a node).
+fn is_child_expr(unresolved: SyntaxContext, ui: &Ui, vars: &HashSet<Key>, e: &Expr) -> bool {
+    match e {
+        Expr::Paren(p) => is_child_expr(unresolved, ui, vars, &p.expr),
+        Expr::Lit(Lit::Str(_)) | Expr::Tpl(_) => true,
+        Expr::Bin(b) if b.op == BinaryOp::LogicalAnd => is_child_expr(unresolved, ui, vars, &b.right),
+        Expr::Cond(c) => {
+            is_child_expr(unresolved, ui, vars, &c.cons) && is_child_expr(unresolved, ui, vars, &c.alt)
+        }
+        _ => is_node_expr(unresolved, ui, vars, e),
     }
 }
 
@@ -204,7 +231,7 @@ impl VisitMut for FlattenUi<'_> {
         }
 
         // Static form: every argument provably a plain child → `__UIX([args])`.
-        if !call.args.iter().all(|a| a.spread.is_none() && is_node_expr(self.unresolved, self.ui, &self.vars, &a.expr)) {
+        if !call.args.iter().all(|a| a.spread.is_none() && is_child_expr(self.unresolved, self.ui, &self.vars, &a.expr)) {
             return;
         }
         let elems: Vec<Option<ExprOrSpread>> = std::mem::take(&mut call.args).into_iter().map(Some).collect();

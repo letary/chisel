@@ -91,9 +91,14 @@ pub struct Ui {
     /// The other free calls that return a node (argument provability: `UIText`, `UIImage`, …).
     /// A node-returning call is one of `factories`, `leaves`, or a `raw` builder.
     pub leaves: Vec<String>,
-    /// Container factories whose function-valued children argument is a reactive children binding.
+    /// Container factories whose function-valued children argument is a reactive children binding
+    /// (and whose string children are anonymous texts: a signal-reading template child becomes a
+    /// reactive `text` call).
     pub containers: Vec<String>,
-    /// The text factory: its (last) text argument is a binding position.
+    /// The text factory, variadic: every argument — and every element of a literal array
+    /// argument — is a part, and a binding position (a function part is a reactive run; a lone
+    /// function is the text's reactive content). reactive_ui also emits a call of it for a
+    /// container's signal-reading template child.
     pub text: String,
     /// Builder methods that return the node (`this`): a chain rooted at a node factory stays a
     /// node. A conservative whitelist — an unlisted method blocks provability.

@@ -78,8 +78,9 @@ pub struct Input {
     #[serde(default)]
     pub keep: Vec<String>,
     /// Reactive-UI desugaring: memoize `.map` inside children bindings (`__uiMap`) and auto-wrap
-    /// signal-reading text/style expressions in arrows. Keys on free references to the SDK's
-    /// injected globals, so it only ever fires in user code. Off by default.
+    /// signal-reading text/style expressions in arrows (every part of a text; a container's
+    /// template child becomes a reactive text). Keys on free references to the SDK's injected
+    /// globals, so it only ever fires in user code. Off by default.
     #[serde(default)]
     pub reactive_ui: bool,
     /// Flatten literal array arguments of UI factory calls into variadic arguments

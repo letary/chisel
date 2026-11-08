@@ -105,6 +105,101 @@ fn text_argument_reading_a_signal_is_wrapped() {
     assert!(has(&code, "UIText(()=>'Count: '+count.value)"), "text arg not wrapped:\n{code}");
 }
 
+// ---- the parts of a text ------------------------------------------------------------------------
+// `UIText(...parts)`: every argument that reads a signal becomes `() => expr` (a reactive run), at
+// any arity and in any position; a part that reads none stays as written.
+
+#[test]
+fn every_signal_reading_part_is_wrapped_at_any_arity() {
+    let code = run(
+        "const a = signal(1)\nconst b = signal(2)
+const two_first = UIText(`${a.value}`, ' items')
+const two_last = UIText('Итого: ', `${b.value} ₽`)
+const three = UIText(`${a.value}`, ' / ', '' + b.value)
+const middle = UIText('x', `${a.value}`, UIText('y'))
+console.log(two_first, two_last, three, middle)",
+        true,
+    );
+    assert!(has(&code, "UIText(() => `${a.value}`, ' items')"), "first of two not wrapped:\n{code}");
+    assert!(has(&code, "UIText('Итого: ', () => `${b.value} ₽`)"), "last of two not wrapped:\n{code}");
+    assert!(has(&code, "UIText(() => `${a.value}`, ' / ', () => '' + b.value)"), "three parts:\n{code}");
+    assert!(has(&code, "UIText('x', () => `${a.value}`, UIText('y'))"), "middle part:\n{code}");
+}
+
+#[test]
+fn a_run_part_reading_no_signal_is_left_and_its_own_parts_are_wrapped() {
+    let code = run(
+        "const n = signal(1)
+const link = UIText('terms').style({ color: 'red' })
+const t = UIText('Accept the ', link, UIText(`${n.value}`, '!'), '.')
+console.log(t)",
+        true,
+    );
+    assert!(has(&code, "UIText('Accept the ', link, UIText(() => `${n.value}`, '!'), '.')"), "run parts:\n{code}");
+}
+
+#[test]
+fn elements_of_a_literal_array_argument_are_parts() {
+    // the SDK flattens an array argument one level: its elements are parts, wrapped one by one
+    // (the array itself is not wrapped — a reactive `() => [...]` would remount the runs on change)
+    let code = run(
+        "const n = signal(1)\nconst lone = UIText(['a', `${n.value}`])\nconst mixed = UIText('x', ['y', '' + n.value])\nconsole.log(lone, mixed)",
+        true,
+    );
+    assert!(has(&code, "UIText(['a', () => `${n.value}`])"), "lone array elements:\n{code}");
+    assert!(has(&code, "UIText('x', ['y', () => '' + n.value])"), "array argument elements:\n{code}");
+}
+
+#[test]
+fn a_lone_function_a_nested_array_and_a_spread_are_left_alone() {
+    let code = run(
+        "const n = signal(1)\nconst parts: any[] = []
+const f = UIText(() => ['a', `${n.value}`])
+const nested = UIText('a', [[`${n.value}`]])
+const spread = UIText(...parts, 'z')
+console.log(f, nested, spread)",
+        true,
+    );
+    assert!(has(&code, "UIText(() => ['a', `${n.value}`])"), "lone function changed:\n{code}");
+    assert!(has(&code, "UIText('a', [[`${n.value}`]])"), "nested array wrapped:\n{code}");
+    assert!(has(&code, "UIText(...parts, 'z')"), "spread changed:\n{code}");
+    assert!(!squish(&code).contains("()=>()=>"), "double wrap:\n{code}");
+}
+
+// ---- a container's template child ---------------------------------------------------------------
+// A string child of a container is an anonymous text read once; a signal-reading TEMPLATE child
+// becomes the reactive text `UIText(() => `…`)`.
+
+#[test]
+fn a_signal_reading_template_child_of_a_container_becomes_a_reactive_text() {
+    let code = run(
+        "const t = signal(1)\nconst a = UIColumn(`Total: ${t.value}`)\nconst b = UIRow([`${t.value} ₽`, 'x'])\nconsole.log(a, b)",
+        true,
+    );
+    assert!(has(&code, "UIColumn(UIText(() => `Total: ${t.value}`))"), "direct child:\n{code}");
+    assert!(has(&code, "UIRow([UIText(() => `${t.value} ₽`), 'x'])"), "array element child:\n{code}");
+}
+
+#[test]
+fn other_container_children_are_left_alone() {
+    // a template reading no signal, a non-template expression (may be an element), a template
+    // inside a children closure (the reconciler updates the anonymous text in place), a template
+    // part of a text (a reactive run, not a nested text)
+    let code = run(
+        "const t = signal(1)\nconst k = 2
+const a = UIColumn(`k = ${k}`)
+const b = UIColumn('n: ' + t.value)
+const c = UIColumn(() => [`${t.value}`])
+const d = UIText('a', `${t.value}`)
+console.log(a, b, c, d)",
+        true,
+    );
+    assert!(has(&code, "UIColumn(`k = ${k}`)"), "static template changed:\n{code}");
+    assert!(has(&code, "UIColumn('n: ' + t.value)"), "non-template changed:\n{code}");
+    assert!(has(&code, "UIColumn(() => [`${t.value}`])"), "closure template changed:\n{code}");
+    assert!(has(&code, "UIText('a', () => `${t.value}`)"), "text part made a nested text:\n{code}");
+}
+
 #[test]
 fn signal_alias_is_inferred_via_fixpoint() {
     let code = run(
