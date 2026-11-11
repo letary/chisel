@@ -47,6 +47,7 @@ fn run_with_assets(main: &str, vocab: Option<Value>, assets: HashMap<String, Str
         reactive_ui: false,
         flatten_ui: true,
         vocab,
+        names: None,
     })
 }
 

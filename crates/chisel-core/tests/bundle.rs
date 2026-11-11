@@ -9,7 +9,7 @@ mod common;
 /// Bundle a set of files. `entry` defaults to `/main.ts`.
 fn run(files: &[(&str, &str)], minify: bool) -> chisel_core::Output {
     let files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
-    bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() })
+    bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None })
 }
 
 fn ok(files: &[(&str, &str)]) -> String {
@@ -53,7 +53,7 @@ fn run_inject(files: &[(&str, &str)], inject: &[&str]) -> chisel_core::Output {
         assets: Default::default(),
         define: Default::default(),
         sourcemap: false,
-        keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(),
+        keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None,
     })
 }
 
@@ -196,7 +196,7 @@ fn m4_fusion_inlines_chain_and_dces_methods() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     // The whole chain is a scalar terminal → fully inlined, no method calls, no Vec3 allocation.
@@ -221,7 +221,7 @@ fn m4_fusion_variable_rooted_chain() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     assert!(!c.contains(".add(") && !c.contains(".scale(") && !c.contains(".dot("), "chain on typed vars should fully fuse:\n{c}");
@@ -266,7 +266,7 @@ fn fuse_date_bundle(main: &str) -> String {
         define: Default::default(),
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(),
+        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None,
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     out.code
@@ -323,7 +323,7 @@ fn m4_fusion_normalize_hoists_hypot_once() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec!["/sdk/inject.ts".into()], format: Format::Esm, minify: false, fuse: true, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
     assert!(!c.contains(".normalize("), "normalize call should be fused:\n{c}");
@@ -400,7 +400,7 @@ fn m6_define_substitutes_free_global() {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<_, _>>();
     let define = [("DEG2RAD".to_string(), "0.017453292519943295".to_string())].into_iter().collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("0.017453292519943295"), "DEG2RAD must be substituted:\n{}", out.code);
     assert!(!out.code.contains("DEG2RAD"), "no free DEG2RAD should remain:\n{}", out.code);
@@ -414,7 +414,7 @@ fn m6_define_leaves_local_const_alone() {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<_, _>>();
     let define = [("DEG2RAD".to_string(), "0.017453292519943295".to_string())].into_iter().collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("Math.PI / 180"), "local const must survive untouched:\n{}", out.code);
 }
@@ -434,7 +434,7 @@ fn run_editor_define(files: &[(&str, &str)], value: &str) -> chisel_core::Output
         define,
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(),
+        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None,
     })
 }
 
@@ -477,7 +477,7 @@ fn m6_boolean_define_leaves_local_binding_alone() {
     let files: &[(&str, &str)] = &[("/main.ts", "const EDITOR = compute()\nfunction compute(): boolean { return Math.random() > 0.5 }\nif (EDITOR) { console.log('maybe') }")];
     let files = files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
     let define = [("EDITOR".to_string(), "false".to_string())].into_iter().collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define, sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("if (EDITOR)"), "local EDITOR branch must survive:\n{}", out.code);
     assert!(out.code.contains("maybe"), "local EDITOR branch body must survive:\n{}", out.code);
@@ -514,7 +514,7 @@ fn m6_mapped_asset_const_is_hoisted() {
     assets.insert("./logo.png".to_string(), "https://cdn.example/logo.png".to_string());
     let files = [("/main.ts", "console.log(logo)\nimport logo from './logo.png'")]
         .iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets, define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets, define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
     let code = out.code;
     let decl = code.find("https://cdn.example/logo.png").expect("asset const missing");
@@ -558,7 +558,7 @@ fn m8_source_map_emitted_with_original_sources() {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect::<HashMap<_, _>>();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: true, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: true, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let map = out.map.expect("source map should be present when requested");
     assert!(map.contains("\"version\":3") || map.contains("\"version\": 3"), "v3 source map:\n{map}");
@@ -601,7 +601,7 @@ fn m9_keep_retains_host_called_methods() {
         define: Default::default(),
         sourcemap: false,
         keep: vec!["_*".into()],
-        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(),
+        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None,
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     let c = out.code;
@@ -633,7 +633,7 @@ fn m9_keep_exact_name() {
         define: Default::default(),
         sourcemap: false,
         keep: vec!["_emitTouchStart".into()],
-        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(),
+        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None,
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     assert!(out.code.contains("_emitTouchStart"), "exact-named keep method survives:\n{}", out.code);
@@ -643,7 +643,7 @@ fn m9_keep_exact_name() {
 #[test]
 fn m0_missing_entry_errors() {
     let files = [("/a.ts", "export const x = 1")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab() });
+    let out = bundle(Input { files, entry: "/main.ts".into(), scan: false, inject: vec![], format: Format::Esm, minify: false, fuse: false, assets: Default::default(), define: Default::default(), sourcemap: false, keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None });
     assert!(out.error.as_deref().unwrap_or_default().contains("Entrypoint not found"));
 }
 
@@ -975,4 +975,138 @@ fn m12_facade_with_impure_value_or_spread_stays_whole() {
     let c = ok(&[("/main.ts", "const cfg = { a: Date.now(), b(): number { return 1 } }\nconst more = { ...cfg, c: 2 }\nconsole.log(cfg.b(), more.c)")]);
     assert!(c.contains("Date.now()"), "a literal with an impure value is not split:\n{c}");
     assert!(c.contains("...cfg"), "a literal with a spread is not split:\n{c}");
+}
+
+// ---- M13: name tables and key gates — what a run-time string selects -----------------------------
+
+const NAMES_SDK: &str = r#"
+const slide = (side: string): string => 'slide ' + side
+const CATALOG: Record<string, () => string> = {
+  push: () => 'the push pair',
+  pop: () => 'the pop pair',
+  'slide-from-left': () => slide('left'),
+  'slide-from-right': () => slide('right'),
+  fade: () => 'the fade',
+}
+const BACK: Record<string, string> = { push: 'pop', pop: 'push', 'slide-from-left': 'slide-from-right', 'slide-from-right': 'slide-from-left', fade: 'fade' }
+const play = (name: string): string => {
+  const make = CATALOG[name]
+  return make ? make() + ' / back: ' + (BACK[name] ?? 'none') : 'none'
+}
+export const idOf = (t: string | undefined, unset: number): number => (t === undefined ? unset : play(t).length)
+const idOfNothing = (_t: string | undefined, unset: number): number => unset
+export const open = (options?: { transition?: string }): number => idOf(options?.transition, 0)
+export const navigate = (name?: string): string => play(name ?? 'push')
+export const stack = (list: string[]): number => { list.push('x'); return list.pop()!.length }
+export const whole = (): string[] => Object.keys(CATALOG)
+"#;
+
+fn names(main: &str, with_names: bool) -> String {
+    let files = [("/main.ts", main), ("/sdk/inject.ts", "export { open, navigate, stack, whole } from './nav'"), ("/sdk/nav.ts", NAMES_SDK)]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<HashMap<_, _>>();
+    let names = with_names.then(|| {
+        serde_json::from_value(serde_json::json!({
+            "tables": [{ "module": "/sdk/nav.ts", "name": "CATALOG" }, { "module": "/sdk/nav.ts", "name": "BACK" }],
+            "gates": [{ "module": "/sdk/nav.ts", "name": "idOf", "key": "transition", "otherwise": "idOfNothing" }],
+        }))
+        .unwrap()
+    });
+    let out = bundle(Input {
+        files,
+        entry: "/main.ts".into(), scan: false,
+        inject: vec!["/sdk/inject.ts".into()],
+        format: Format::Esm,
+        minify: false,
+        fuse: false,
+        assets: Default::default(),
+        define: Default::default(),
+        sourcemap: false,
+        keep: Default::default(), reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names,
+    });
+    assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
+    out.code
+}
+
+#[test]
+fn m13_a_table_keeps_the_members_a_string_names() {
+    // `fade` is named; its way back is itself. Nothing names a slide or the stacked pair.
+    let c = names("console.log(open({ transition: 'fade' }))", true);
+    assert!(c.contains("the fade"), "the named member is gone:\n{c}");
+    assert!(!c.contains("the push pair") && !c.contains("the pop pair"), "an unnamed member stayed:\n{c}");
+    assert!(!c.contains("slide-from-left") && !c.contains("'slide '"), "an unnamed member (and its helper) stayed:\n{c}");
+    // without `names` the same code carries the tables whole
+    let whole = names("console.log(open({ transition: 'fade' }))", false);
+    assert!(whole.contains("the push pair") && whole.contains("slide-from-left"), "the plain facade lost members:\n{whole}");
+}
+
+#[test]
+fn m13_a_members_value_names_the_next_member() {
+    // the SDK's own default: `navigate()` plays "push", whose way back is "pop"
+    let c = names("console.log(navigate())", true);
+    assert!(c.contains("the push pair") && c.contains("the pop pair"), "push did not carry pop:\n{c}");
+    assert!(!c.contains("the fade") && !c.contains("slide-from"), "an unnamed member stayed:\n{c}");
+}
+
+#[test]
+fn m13_a_member_name_is_not_a_string() {
+    // `.push(…)` / `.pop()` are array calls — the facade rule (name presence) does not reach a table
+    let c = names("console.log(stack(['a']), open({ transition: 'fade' }))", true);
+    assert!(!c.contains("the push pair") && !c.contains("the pop pair"), "a member call kept a table member:\n{c}");
+}
+
+#[test]
+fn m13_a_string_in_unreached_code_names_nothing() {
+    // `navigate` (with its "push" default) is not called
+    let c = names("console.log(open({ transition: 'fade' }))", true);
+    assert!(!c.contains("the push pair"), "unreached SDK code named a member:\n{c}");
+}
+
+#[test]
+fn m13_a_built_string_keeps_what_its_literal_part_begins_or_ends() {
+    let c = names("const side = Math.random() > 0.5 ? 'left' : 'right'\nconsole.log(open({ transition: `slide-from-${side}` }))", true);
+    assert!(c.contains("slide-from-left") && c.contains("slide-from-right"), "a template's members are gone:\n{c}");
+    assert!(!c.contains("the fade") && !c.contains("the push pair"), "an unrelated member stayed:\n{c}");
+    let c = names("const k = Math.random() > 0.5 ? 'pu' : 'po'\nconsole.log(open({ transition: k + 'sh' }))", true);
+    assert!(c.contains("the push pair"), "a concatenation's member is gone:\n{c}");
+    assert!(!c.contains("the fade"), "an unrelated member stayed:\n{c}");
+}
+
+#[test]
+fn m13_any_other_use_of_a_table_keeps_it_whole() {
+    let c = names("console.log(whole())", true);
+    for member in ["the push pair", "the pop pair", "slide-from-left", "the fade"] {
+        assert!(c.contains(member), "an escaped table lost {member}:\n{c}");
+    }
+}
+
+#[test]
+fn m13_a_gate_nobody_opens_leaves_the_stand_in() {
+    // no reachable code writes `transition`: `open` calls the stand-in, the tables never come in
+    let c = names("console.log(open())", true);
+    assert!(c.contains("idOfNothing"), "the stand-in is not referenced:\n{c}");
+    assert!(!c.contains("play") && !c.contains("CATALOG") && !c.contains("the fade"), "the gated code stayed:\n{c}");
+    assert!(!c.contains("idOf("), "a reference to the gated function stayed:\n{c}");
+    // without `names` the function is itself
+    let plain = names("console.log(open())", false);
+    assert!(plain.contains("idOf(") && plain.contains("CATALOG"), "the plain bundle lost the function:\n{plain}");
+}
+
+#[test]
+fn m13_a_written_key_opens_the_gate() {
+    for main in [
+        "console.log(open({ transition: 'fade' }))",
+        "const transition = 'fade'\nconsole.log(open({ transition }))",
+        "const o: { transition?: string } = {}\no.transition = 'fade'\nconsole.log(open(o))",
+        "class Options { transition = 'fade' }\nconsole.log(open(new Options()))",
+        "const o: Record<string, string> = {}\no['transition'] = 'fade'\nconsole.log(open(o))",
+    ] {
+        let c = names(main, true);
+        assert!(c.contains("idOf(") && c.contains("the fade"), "the gate stayed closed for:\n{main}\n---\n{c}");
+        assert!(!c.contains("idOfNothing"), "the stand-in stayed for:\n{main}\n---\n{c}");
+    }
+    // a READ of the key is not a write (the SDK reads `options?.transition` itself)
+    let c = names("const o: { transition?: string } = {}\nconsole.log(o.transition, open(o))", true);
+    assert!(c.contains("idOfNothing"), "a read opened the gate:\n{c}");
 }

@@ -38,7 +38,7 @@ fn build(main: &str, fuse: bool) -> Output {
         define: Default::default(),
         sourcemap: false,
         keep: vec!["_*".into()],
-        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(),
+        reactive_ui: false, flatten_ui: false, vocab: common::sdk_vocab(), names: None,
     });
     assert!(out.error.is_none(), "error: {:?}", out.error);
     out

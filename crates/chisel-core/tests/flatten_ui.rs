@@ -35,7 +35,7 @@ fn run_full(main: &str, reactive_ui: bool, flatten_ui: bool) -> String {
         define: Default::default(),
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui, flatten_ui, vocab: common::sdk_vocab(),
+        reactive_ui, flatten_ui, vocab: common::sdk_vocab(), names: None,
     });
     assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
     out.code
@@ -323,7 +323,7 @@ fn sdk_internal_calls_are_inert() {
         define: Default::default(),
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui: false, flatten_ui: true, vocab: common::sdk_vocab(),
+        reactive_ui: false, flatten_ui: true, vocab: common::sdk_vocab(), names: None,
     });
     assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
     assert!(has(&out.code, "UIColumn(["), "SDK-internal call was touched:\n{}", out.code);

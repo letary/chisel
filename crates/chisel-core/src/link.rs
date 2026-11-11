@@ -21,6 +21,18 @@
 //! emitted), whereas in the SDK (`sideEffects: false`) it is dropped — *unless* it mutates one of
 //! that module's own top-level bindings (`X.y = …`, `Object.defineProperty(X, …)`), which makes it
 //! part of `X`'s declaration: kept iff `X` is reached, and its references are held back until then.
+//!
+//! **Name tables and key gates** (`Input.names`, [`Names`]) extend Phase B to what a STRING selects.
+//! A *name table* is a facade the SDK looks a run-time string up in (`CATALOG[name]`): its members
+//! are pulled by *string presence* — a string literal equal to the member's name anywhere in
+//! reachable code (a member's own value included, so `{ push: "pop" }` carries `pop` with `push`) —
+//! and by nothing else: a `.push(…)` call is not a name. A template or a `"lit" + x` concatenation
+//! keeps every member its literal part begins or ends. A *key gate* is an SDK function that only
+//! matters when some object carries a property (`options.transition`): until reachable code WRITES
+//! that key — an object-literal key, a `x.key = …` assignment, a class field or accessor, the key as
+//! a string — references to the function are held back, and if none ever does they are emitted as
+//! references to its declared stand-in. Both hold for names that appear in the bundle's code; a name
+//! that only arrives as run-time DATA is not seen (the SDK's lookups warn about it).
 //! Phase C — **concatenate** kept items/members in dependency order, unwrapping `export`.
 //! Phase D — **hygiene()** finalizes globally-unique names; emit one `Module`.
 
@@ -35,6 +47,34 @@ use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use crate::graph::{self, ModuleGraph};
 use crate::vocab::Vocab;
+
+/// `Input.names`: what a run-time string selects (see the module docs). Not part of the vocabulary
+/// manifest: an older binary ignores the unknown input field and bundles the tables whole.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Names {
+    pub tables: Vec<NameTable>,
+    pub gates: Vec<NameGate>,
+}
+
+/// A name table: the top-level `const <name> = { … }` of `module` (a facade, see `facade_of`).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NameTable {
+    pub module: String,
+    pub name: String,
+}
+
+/// A key gate: `name` of `module` is needed only by a bundle that writes the property `key`;
+/// otherwise its references become references to `otherwise` (a binding of the same module).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NameGate {
+    pub module: String,
+    pub name: String,
+    pub key: String,
+    pub otherwise: String,
+}
 
 type Key = (Atom, SyntaxContext);
 
@@ -101,6 +141,9 @@ enum Edge {
     AllInstance,          // `obj[expr]` — dynamic access keeps all instance methods
     ObjMember(Key, Atom), // `X.name` on an object facade — that property
     ObjEscape(Key),       // any other use of a facade (bare value, computed / unknown member, `new`) — whole
+    Str(Atom),            // a string that names a member of a name table
+    KeyWrite(Atom),       // a write of a gate's property key
+    Gated(Key),           // ref to a gated function — a `Decl` once its key is written
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -116,26 +159,87 @@ enum Task {
     Reach(Unit),
     Live(Atom),
     AllLive,
+    Str(Atom),
+    Key(Atom),
+    Gated(Key),
 }
 
-struct Collector<'a> {
+/// What the collector classifies references against.
+struct Cx<'a> {
     class_keys: &'a HashSet<Key>,
     binding_keys: &'a HashSet<Key>,
     /// Every name that is an instance **setter** on some class (see `visit_prop`).
     setter_names: &'a HashSet<Atom>,
     /// The object facades (see `facade_of`) and their property names.
     obj_members: &'a HashMap<Key, Vec<Atom>>,
+    /// The facades that are name tables, and every member name of one.
+    tables: &'a HashSet<Key>,
+    table_names: &'a HashSet<Atom>,
+    /// The gated functions (→ their key and stand-in), and every gate's key.
+    gates: &'a HashMap<Key, (Atom, Key)>,
+    gate_keys: &'a HashSet<Atom>,
+}
+
+struct Collector<'a> {
+    cx: &'a Cx<'a>,
     out: Vec<Edge>,
+}
+
+impl Collector<'_> {
+    /// A whole string: the name of a table member, the key of a gate.
+    fn note_str(&mut self, v: &str) {
+        let a = Atom::from(v);
+        if self.cx.table_names.contains(&a) {
+            self.out.push(Edge::Str(a.clone()));
+        }
+        if self.cx.gate_keys.contains(&a) {
+            self.out.push(Edge::KeyWrite(a));
+        }
+    }
+
+    /// A literal PART of a string built at run time (`\`slide-from-${side}\``, `"in" + curve`): every
+    /// name it begins or ends may be the result.
+    fn note_part(&mut self, part: &str) {
+        if part.is_empty() {
+            return;
+        }
+        for name in self.cx.table_names {
+            if name.starts_with(part) || name.ends_with(part) {
+                self.out.push(Edge::Str(name.clone()));
+            }
+        }
+        for key in self.cx.gate_keys {
+            if key.starts_with(part) || key.ends_with(part) {
+                self.out.push(Edge::KeyWrite(key.clone()));
+            }
+        }
+    }
+
+    fn note_key(&mut self, name: &Atom) {
+        if self.cx.gate_keys.contains(name) {
+            self.out.push(Edge::KeyWrite(name.clone()));
+        }
+    }
+}
+
+fn str_lit(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Lit(Lit::Str(s)) => s.value.as_str(),
+        Expr::Paren(p) => str_lit(&p.expr),
+        _ => None,
+    }
 }
 
 impl Visit for Collector<'_> {
     fn visit_ident(&mut self, id: &Ident) {
         let k = (id.sym.clone(), id.ctxt);
-        if self.class_keys.contains(&k) {
+        if self.cx.class_keys.contains(&k) {
             self.out.push(Edge::Escape(k));
-        } else if self.obj_members.contains_key(&k) {
+        } else if self.cx.obj_members.contains_key(&k) {
             self.out.push(Edge::ObjEscape(k));
-        } else if self.binding_keys.contains(&k) {
+        } else if self.cx.gates.contains_key(&k) {
+            self.out.push(Edge::Gated(k));
+        } else if self.cx.binding_keys.contains(&k) {
             self.out.push(Edge::Decl(k));
         }
     }
@@ -143,16 +247,16 @@ impl Visit for Collector<'_> {
     fn visit_new_expr(&mut self, n: &NewExpr) {
         if let Expr::Ident(callee) = &*n.callee {
             let k = (callee.sym.clone(), callee.ctxt);
-            if self.obj_members.contains_key(&k) {
+            if self.cx.obj_members.contains_key(&k) {
                 self.out.push(Edge::ObjEscape(k));
                 visit_args(self, &n.args);
                 return;
-            } else if self.class_keys.contains(&k) {
+            } else if self.cx.class_keys.contains(&k) {
                 self.out.push(Edge::Core(k));
                 visit_args(self, &n.args);
                 return;
-            } else if self.binding_keys.contains(&k) {
-                self.out.push(Edge::Decl(k));
+            } else if self.cx.binding_keys.contains(&k) {
+                self.out.push(if self.cx.gates.contains_key(&k) { Edge::Gated(k) } else { Edge::Decl(k) });
                 visit_args(self, &n.args);
                 return;
             }
@@ -163,7 +267,7 @@ impl Visit for Collector<'_> {
     fn visit_member_expr(&mut self, m: &MemberExpr) {
         if let Expr::Ident(obj) = &*m.obj {
             let k = (obj.sym.clone(), obj.ctxt);
-            if self.class_keys.contains(&k) {
+            if self.cx.class_keys.contains(&k) {
                 match &m.prop {
                     MemberProp::Ident(name) => self.out.push(Edge::Static(k, name.sym.clone())),
                     MemberProp::Computed(c) => {
@@ -174,7 +278,25 @@ impl Visit for Collector<'_> {
                 }
                 return;
             }
-            if let Some(members) = self.obj_members.get(&k) {
+            // A name table: `T.name` is that member, `T[key]` is a LOOKUP — the table itself, its
+            // members by the strings that name them (`Task::Str`); a member name is not presence.
+            if self.cx.tables.contains(&k) {
+                let members = &self.cx.obj_members[&k];
+                match &m.prop {
+                    MemberProp::Ident(name) if members.contains(&name.sym) => self.out.push(Edge::ObjMember(k, name.sym.clone())),
+                    MemberProp::Computed(c) => match str_lit(&c.expr) {
+                        Some(name) if members.contains(&Atom::from(name)) => self.out.push(Edge::ObjMember(k, Atom::from(name))),
+                        Some(_) => self.out.push(Edge::ObjEscape(k)),
+                        None => {
+                            self.out.push(Edge::Decl(k));
+                            c.expr.visit_with(self);
+                        }
+                    },
+                    _ => self.out.push(Edge::ObjEscape(k)),
+                }
+                return;
+            }
+            if let Some(members) = self.cx.obj_members.get(&k) {
                 let name = match &m.prop {
                     MemberProp::Ident(name) => Some(name.sym.clone()),
                     MemberProp::Computed(c) => match &*c.expr {
@@ -210,6 +332,8 @@ impl Visit for Collector<'_> {
                 // A string-literal key names a specific member.
                 Expr::Lit(Lit::Str(s)) => {
                     self.out.push(Edge::Instance(Atom::from(s.value.as_str().unwrap_or(""))));
+                    // …and is a string like any other (`o["transition"] = …` writes a gate's key)
+                    self.note_str(s.value.as_str().unwrap_or(""));
                     m.obj.visit_with(self);
                 }
                 // Any other computed *read* (`v[0]`, `store[k]`, `m.m[12]`) is data access — it can't
@@ -244,11 +368,62 @@ impl Visit for Collector<'_> {
     /// (A computed key `{ [k]: v }` stays data access, like a computed read.)
     fn visit_prop(&mut self, p: &Prop) {
         if let Some(name) = prop_key_name(p) {
-            if self.setter_names.contains(&name) {
+            self.note_key(&name);
+            if self.cx.setter_names.contains(&name) {
                 self.out.push(Edge::Instance(name));
             }
         }
         p.visit_children_with(self);
+    }
+
+    /// `x.key = …` writes a gate's key like an object-literal key does.
+    fn visit_assign_expr(&mut self, n: &AssignExpr) {
+        if let AssignTarget::Simple(SimpleAssignTarget::Member(MemberExpr { prop: MemberProp::Ident(name), .. })) = &n.left {
+            self.note_key(&name.sym);
+        }
+        n.visit_children_with(self);
+    }
+
+    /// A class field of a gate's key: an instance handed over as the options object carries it.
+    fn visit_class_prop(&mut self, p: &ClassProp) {
+        if let Some(name) = simple_prop_name(&p.key) {
+            self.note_key(&name);
+        }
+        p.visit_children_with(self);
+    }
+
+    /// A string in expression position (never a property key: `PropName::Str` is not a `Lit`).
+    fn visit_lit(&mut self, l: &Lit) {
+        if let Lit::Str(s) = l {
+            if let Some(v) = s.value.as_str() {
+                self.note_str(v);
+            }
+        }
+    }
+
+    fn visit_tpl(&mut self, t: &Tpl) {
+        let text = |q: &TplElement| q.cooked.as_ref().and_then(|c| c.as_str().map(str::to_string)).unwrap_or_else(|| q.raw.to_string());
+        if t.exprs.is_empty() {
+            if let Some(q) = t.quasis.first() {
+                self.note_str(&text(q));
+            }
+        } else {
+            for q in &t.quasis {
+                self.note_part(&text(q));
+            }
+        }
+        t.visit_children_with(self);
+    }
+
+    fn visit_bin_expr(&mut self, b: &BinExpr) {
+        if b.op == BinaryOp::Add {
+            for (lit, other) in [(&b.left, &b.right), (&b.right, &b.left)] {
+                if let (Some(part), None) = (str_lit(lit), str_lit(other)) {
+                    self.note_part(part);
+                }
+            }
+        }
+        b.visit_children_with(self);
     }
 
     /// Destructuring reads members by name exactly like `.name` does: `const { velocity } = body`
@@ -275,14 +450,8 @@ fn visit_args(c: &mut Collector, args: &Option<Vec<ExprOrSpread>>) {
     }
 }
 
-fn edges_of(
-    node_visit: impl Fn(&mut Collector),
-    class_keys: &HashSet<Key>,
-    binding_keys: &HashSet<Key>,
-    setter_names: &HashSet<Atom>,
-    obj_members: &HashMap<Key, Vec<Atom>>,
-) -> Vec<Edge> {
-    let mut c = Collector { class_keys, binding_keys, setter_names, obj_members, out: Vec::new() };
+fn edges_of(node_visit: impl Fn(&mut Collector), cx: &Cx) -> Vec<Edge> {
+    let mut c = Collector { cx, out: Vec::new() };
     node_visit(&mut c);
     c.out
 }
@@ -552,6 +721,7 @@ pub fn link(
     fuse: bool,
     keep: &[String],
     vocab: &Vocab,
+    names: &Names,
     cm: &Lrc<SourceMap>,
     diagnostics: &mut Vec<String>,
 ) -> anyhow::Result<Module> {
@@ -714,6 +884,51 @@ pub fn link(
         }
     }
 
+    // --- name tables and key gates (`Input.names`): an entry that names no module of this bundle, a
+    // binding that is not there or a table that is not a facade is skipped — the code bundles whole. ---
+    let key_in = |module: &str, name: &str| -> Option<Key> {
+        let m = &graph.modules[*graph.path_to_id.get(module)?];
+        let k = (Atom::from(name), m.top_level_ctxt);
+        binding_keys.contains(&k).then_some(k)
+    };
+    let mut tables: HashSet<Key> = HashSet::new();
+    let mut table_names: HashSet<Atom> = HashSet::new();
+    let mut tables_with_name: HashMap<Atom, Vec<Key>> = HashMap::new();
+    for t in &names.tables {
+        let Some(k) = key_in(&t.module, &t.name) else { continue };
+        let Some(members) = obj_members.get(&k) else { continue };
+        if tables.insert(k.clone()) {
+            for name in members {
+                table_names.insert(name.clone());
+                tables_with_name.entry(name.clone()).or_default().push(k.clone());
+            }
+        }
+    }
+    // A table's members answer to strings alone, never to member-name presence.
+    for facades in objects_with_member.values_mut() {
+        facades.retain(|k| !tables.contains(k));
+    }
+    let mut gates: HashMap<Key, (Atom, Key)> = HashMap::new();
+    let mut gate_keys: HashSet<Atom> = HashSet::new();
+    for g in &names.gates {
+        let (Some(f), Some(otherwise)) = (key_in(&g.module, &g.name), key_in(&g.module, &g.otherwise)) else { continue };
+        if g.key.is_empty() || class_keys.contains(&f) || obj_members.contains_key(&f) {
+            continue;
+        }
+        gate_keys.insert(Atom::from(g.key.as_str()));
+        gates.insert(f, (Atom::from(g.key.as_str()), otherwise));
+    }
+    let cx = Cx {
+        class_keys: &class_keys,
+        binding_keys: &binding_keys,
+        setter_names: &setter_names,
+        obj_members: &obj_members,
+        tables: &tables,
+        table_names: &table_names,
+        gates: &gates,
+        gate_keys: &gate_keys,
+    };
+
     // --- build reachability units + seed roots from user code. ---
     let mut unit_edges: HashMap<Unit, Vec<Edge>> = HashMap::new();
     let mut roots: Vec<Edge> = Vec::new();
@@ -729,12 +944,12 @@ pub fn link(
                 ItemKind::Drop => continue,
                 // A user side effect must run → its references are reachability roots.
                 ItemKind::SideEffect => {
-                    roots.extend(edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members));
+                    roots.extend(edges_of(|c| item.visit_with(c), &cx));
                 }
                 // Not a root: it only runs if its anchor survives, so its refs are held back until
                 // then — otherwise attaching a statement would drag its whole reference set in.
                 ItemKind::AttachedTo(anchor) => {
-                    let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members);
+                    let e = edges_of(|c| item.visit_with(c), &cx);
                     pending.entry(anchor).or_default().extend(e);
                 }
                 // A pure decl becomes unit(s); its references are pulled only if the unit is reached.
@@ -743,13 +958,18 @@ pub fn link(
                         let key = (cd.ident.sym.clone(), ctxt);
                         let mut core = Vec::new();
                         if let Some(sc) = &cd.class.super_class {
-                            core.extend(edges_of(|c| sc.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members));
+                            core.extend(edges_of(|c| sc.visit_with(c), &cx));
                         }
                         for mem in &cd.class.body {
                             match method_name(mem) {
                                 Some((name, is_static)) => {
                                     if let ClassMember::Method(mm) = mem {
-                                        let e = edges_of(|c| mm.function.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members);
+                                        let mut e = edges_of(|c| mm.function.visit_with(c), &cx);
+                                        // An ACCESSOR of a gate's key: an instance handed over as the options
+                                        // object answers the read. (A plain method of that name is no value.)
+                                        if gate_keys.contains(&name) && mm.kind != MethodKind::Method {
+                                            e.push(Edge::KeyWrite(name.clone()));
+                                        }
                                         let unit = if is_static {
                                             Unit::Static(key.clone(), name)
                                         } else {
@@ -758,7 +978,7 @@ pub fn link(
                                         unit_edges.entry(unit).or_default().extend(e);
                                     }
                                 }
-                                None => core.extend(edges_of(|c| mem.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members)),
+                                None => core.extend(edges_of(|c| mem.visit_with(c), &cx)),
                             }
                         }
                         unit_edges.entry(Unit::Core(key)).or_default().extend(core);
@@ -772,7 +992,7 @@ pub fn link(
                                 for p in &obj.props {
                                     if let PropOrSpread::Prop(prop) = p {
                                         if let Some(name) = prop_key_name(prop) {
-                                            let e = edges_of(|c| prop.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members);
+                                            let e = edges_of(|c| prop.visit_with(c), &cx);
                                             unit_edges.entry(Unit::ObjMember(key.clone(), name)).or_default().extend(e);
                                         }
                                     }
@@ -780,7 +1000,7 @@ pub fn link(
                             }
                         }
                         None => {
-                            let e = edges_of(|c| item.visit_with(c), &class_keys, &binding_keys, &setter_names, &obj_members);
+                            let e = edges_of(|c| item.visit_with(c), &cx);
                             for k in binding_keys_of_decl(d, ctxt) {
                                 unit_edges.entry(Unit::Decl(k)).or_default().extend(e.clone());
                             }
@@ -796,6 +1016,12 @@ pub fn link(
     let mut reached: HashSet<Unit> = HashSet::new();
     let mut live: HashSet<Atom> = HashSet::new();
     let mut all_instance = false;
+    // The strings that name table members, the gate keys that are written, and the gated functions
+    // referenced while their key was not.
+    let mut live_strs: HashSet<Atom> = HashSet::new();
+    let mut live_keys: HashSet<Atom> = HashSet::new();
+    let mut gated_refs: HashSet<Key> = HashSet::new();
+    let mut gates_settled = false;
     let mut work: Vec<Task> = Vec::new();
     for e in &roots {
         edge_task(e, &class_statics, &obj_members, &mut work);
@@ -820,6 +1046,7 @@ pub fn link(
     for name in &comp_live {
         work.push(Task::Live(name.clone()));
     }
+    loop {
     while let Some(t) = work.pop() {
         match t {
             Task::Reach(u) => {
@@ -838,11 +1065,13 @@ pub fn link(
                             }
                         }
                     }
-                    // A facade going live brings the properties whose names are already live.
+                    // A facade going live brings the properties whose names are already live — a
+                    // name table's by the strings that name them.
                     Unit::Decl(k) => {
                         if let Some(names) = obj_members.get(k) {
+                            let table = tables.contains(k);
                             for name in names {
-                                if all_instance || live.contains(name) {
+                                if if table { live_strs.contains(name) } else { all_instance || live.contains(name) } {
                                     work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone())));
                                 }
                             }
@@ -896,15 +1125,61 @@ pub fn link(
                     }
                 }
                 for (k, names) in &obj_members {
-                    if reached.contains(&Unit::Decl(k.clone())) {
+                    if !tables.contains(k) && reached.contains(&Unit::Decl(k.clone())) {
                         for name in names {
                             work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone())));
                         }
                     }
                 }
             }
+            Task::Str(name) => {
+                if !live_strs.insert(name.clone()) {
+                    continue;
+                }
+                if let Some(owners) = tables_with_name.get(&name) {
+                    for k in owners {
+                        if reached.contains(&Unit::Decl(k.clone())) {
+                            work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone())));
+                        }
+                    }
+                }
+            }
+            Task::Key(key) => {
+                if !live_keys.insert(key.clone()) {
+                    continue;
+                }
+                for f in &gated_refs {
+                    if gates[f].0 == key {
+                        work.push(Task::Reach(Unit::Decl(f.clone())));
+                    }
+                }
+            }
+            Task::Gated(f) => {
+                if live_keys.contains(&gates[&f].0) {
+                    work.push(Task::Reach(Unit::Decl(f)));
+                } else {
+                    gated_refs.insert(f);
+                }
+            }
         }
     }
+    // Nothing more is reachable: a gate whose key was never written closes — its stand-in comes in
+    // (and whatever that references; were it to write the key, the gate opens after all).
+    if gates_settled {
+        break;
+    }
+    gates_settled = true;
+    for f in &gated_refs {
+        if !live_keys.contains(&gates[f].0) {
+            work.push(Task::Reach(Unit::Decl(gates[f].1.clone())));
+        }
+    }
+    }
+    let closed_gates: HashMap<Key, Key> = gated_refs
+        .iter()
+        .filter(|f| !reached.contains(&Unit::Decl((*f).clone())))
+        .map(|f| (f.clone(), gates[f].1.clone()))
+        .collect();
 
     // --- module ordering (over-approximate deps from full item refs). ---
     let mut key_module: HashMap<Key, usize> = HashMap::new();
@@ -971,6 +1246,14 @@ pub fn link(
         }
     }
 
+    // A closed gate: its function was not emitted — every reference to it names the stand-in.
+    if !closed_gates.is_empty() {
+        let mut rewriter = GateRewriter { closed: &closed_gates };
+        for item in body.iter_mut() {
+            item.visit_mut_with(&mut rewriter);
+        }
+    }
+
     let mut merged = Module { span: DUMMY_SP, body, shebang: None };
     let mut program = Program::Module(std::mem::take(&mut merged));
     program.mutate(hygiene());
@@ -982,6 +1265,9 @@ pub fn link(
 
 fn edge_task(e: &Edge, class_statics: &HashMap<Key, HashSet<Atom>>, obj_members: &HashMap<Key, Vec<Atom>>, work: &mut Vec<Task>) {
     match e {
+        Edge::Str(name) => work.push(Task::Str(name.clone())),
+        Edge::KeyWrite(key) => work.push(Task::Key(key.clone())),
+        Edge::Gated(f) => work.push(Task::Gated(f.clone())),
         Edge::ObjMember(k, name) => work.push(Task::Reach(Unit::ObjMember(k.clone(), name.clone()))),
         Edge::ObjEscape(k) => {
             work.push(Task::Reach(Unit::Decl(k.clone())));
@@ -1010,6 +1296,34 @@ fn edge_task(e: &Edge, class_statics: &HashMap<Key, HashSet<Atom>>, obj_members:
         }
         Edge::Instance(name) => work.push(Task::Live(name.clone())),
         Edge::AllInstance => work.push(Task::AllLive),
+    }
+}
+
+/// Rewrites the references to a closed gate's function into references to its stand-in.
+struct GateRewriter<'a> {
+    closed: &'a HashMap<Key, Key>,
+}
+
+impl VisitMut for GateRewriter<'_> {
+    fn visit_mut_ident(&mut self, id: &mut Ident) {
+        if let Some((sym, ctxt)) = self.closed.get(&(id.sym.clone(), id.ctxt)) {
+            id.sym = sym.clone();
+            id.ctxt = *ctxt;
+        }
+    }
+
+    /// `{ f }` is key and value at once (see `Relinker`): only the value side is renamed.
+    fn visit_mut_prop(&mut self, p: &mut Prop) {
+        if let Prop::Shorthand(id) = p {
+            if self.closed.contains_key(&(id.sym.clone(), id.ctxt)) {
+                let key = PropName::Ident(IdentName::new(id.sym.clone(), id.span));
+                let mut value = id.clone();
+                self.visit_mut_ident(&mut value);
+                *p = Prop::KeyValue(KeyValueProp { key, value: Box::new(Expr::Ident(value)) });
+                return;
+            }
+        }
+        p.visit_mut_children_with(self);
     }
 }
 

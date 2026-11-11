@@ -39,7 +39,7 @@ fn run_files(project: &[(&str, &str)], reactive_ui: bool) -> String {
         define: Default::default(),
         sourcemap: false,
         keep: Default::default(),
-        reactive_ui, flatten_ui: false, vocab: common::sdk_vocab(),
+        reactive_ui, flatten_ui: false, vocab: common::sdk_vocab(), names: None,
     });
     assert!(out.error.is_none(), "unexpected error: {:?}", out.error);
     out.code

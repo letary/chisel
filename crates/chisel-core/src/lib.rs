@@ -97,6 +97,11 @@ pub struct Input {
     /// a hard error. Shape and rules: [`vocab::Vocab`].
     #[serde(default)]
     pub vocab: Option<serde_json::Value>,
+    /// What a run-time string selects in the SDK: the name tables whose members are kept by string
+    /// presence, and the functions gated on a property key ([`link::Names`]). Absent = none: every
+    /// table bundles whole.
+    #[serde(default)]
+    pub names: Option<link::Names>,
 }
 
 /// Bundler output. `error` is `Some` on a hard failure (and `code` is empty).
@@ -151,7 +156,7 @@ fn bundle_inner(input: &Input) -> anyhow::Result<(String, Option<String>, Vec<St
         let inject_ids: Vec<usize> = input.inject.iter().map(|p| g.path_to_id[p]).collect();
 
         let mut diagnostics = Vec::new();
-        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse, &input.keep, &vocab, &cm, &mut diagnostics)?;
+        let merged = link::link(&mut g, entry_id, &inject_ids, input.fuse, &input.keep, &vocab, &input.names.clone().unwrap_or_default(), &cm, &mut diagnostics)?;
         let (code, map) = emit::codegen(&cm, &merged, input.minify, input.sourcemap)?;
         // The IIFE wrapper must not add a leading line, or every source-map line would shift by one.
         let code = match input.format {
