@@ -9,7 +9,7 @@ use swc_core::ecma::ast::{Module, Program};
 use swc_core::ecma::codegen::text_writer::JsWriter;
 use swc_core::ecma::codegen::{Config, Emitter};
 use swc_core::ecma::minifier::optimize;
-use swc_core::ecma::minifier::option::{ExtraOptions, MangleOptions, MinifyOptions};
+use swc_core::ecma::minifier::option::{CompressOptions, ExtraOptions, MangleOptions, MinifyOptions, TopLevelOptions};
 use swc_core::ecma::transforms::base::fixer::fixer;
 use swc_core::ecma::transforms::base::resolver;
 use swc_core::ecma::visit::VisitMutWith;
@@ -79,7 +79,10 @@ fn minify_module(cm: &Lrc<SourceMap>, module: Module) -> Module {
         None,
         None,
         &MinifyOptions {
-            compress: Some(Default::default()),
+            // The same closed scope lets the compressor work on the top level: a constant it has inlined
+            // at every use (`export const KIND_FLOAT = 0`) loses its declaration too. swc has one switch
+            // for it (`top_level()` = `functions || module`), so it covers functions as well as variables.
+            compress: Some(CompressOptions { top_level: Some(TopLevelOptions { functions: true }), ..Default::default() }),
             // `top_level: true` is safe and is the bulk of the win — nothing references these names
             // from outside the bundle.
             mangle: Some(MangleOptions { top_level: Some(true), ..Default::default() }),
