@@ -39,6 +39,53 @@ fn m0_minify() {
     assert!(!out.code.contains('\n'), "minified output should be one line:\n{}", out.code);
 }
 
+// The compressor gets a tree without parentheses (emit.rs `paren_remover`). A parenthesised arrow —
+// what `(…) as any` leaves — was not seen as a function by swc's sequence merger, which moved an
+// inlined function's argument into that arrow's body: `(e = () => this)().put(a)`. Every other closure
+// of the body read `e` unset until the first one ran (`set.append` threw "not a function" — the SDK's
+// `screen.widgets.append`). The argument must be bound before the closures are made.
+#[test]
+fn minify_binds_an_inlined_functions_argument_outside_its_closures() {
+    let src = r#"
+type Host = { put(items: unknown[]): void, add(items: unknown[]): void }
+const makeSet = <O>(owner: O, host: () => Host) => {
+  const set = ((...args: unknown[]) => { host().put(args); return owner }) as any
+  set.append = (...items: unknown[]) => { host().add(items) }
+  set.remove = (...items: unknown[]) => { host().add(items) }
+  return set
+}
+class Screen {
+  private _set?: any
+  get widgets() {
+    if (!this._set) this._set = makeSet(this, () => this)
+    return this._set
+  }
+  put(items: unknown[]) { console.log("put " + items.length) }
+  add(items: unknown[]) { console.log("add " + items.length) }
+}
+new Screen().widgets.append(1)
+"#;
+    let out = run(&[("/main.ts", src)], true);
+    assert!(out.error.is_none());
+    // never an assignment made inside the first closure, called on the spot
+    assert!(!out.code.contains("=()=>this)()"), "an argument bound inside a closure:\n{}", out.code);
+    // the function is still flattened into its one caller: no call with the host closure as an argument
+    assert!(!out.code.contains("(this,()=>this)"), "the once-called function was not inlined:\n{}", out.code);
+}
+
+// The same with nothing around it: the smallest input that showed it.
+#[test]
+fn minify_does_not_merge_an_assignment_into_a_parenthesised_arrow() {
+    let src = r#"
+const mk = (h: any) => { const s: any = (() => h()); s.b = () => h(); return s }
+function go(o: any) { return mk(() => o) }
+console.log("add " + go(1).b())
+"#;
+    let out = run(&[("/main.ts", src)], true);
+    assert!(out.error.is_none());
+    assert!(!out.code.contains("=()=>1)()"), "an argument bound inside a closure:\n{}", out.code);
+}
+
 // ---- M1: linking, injection, whole-decl DCE ---------------------------------------------------
 
 fn run_inject(files: &[(&str, &str)], inject: &[&str]) -> chisel_core::Output {

@@ -10,7 +10,7 @@ use swc_core::ecma::codegen::text_writer::JsWriter;
 use swc_core::ecma::codegen::{Config, Emitter};
 use swc_core::ecma::minifier::optimize;
 use swc_core::ecma::minifier::option::{CompressOptions, ExtraOptions, MangleOptions, MinifyOptions, TopLevelOptions};
-use swc_core::ecma::transforms::base::fixer::fixer;
+use swc_core::ecma::transforms::base::fixer::{fixer, paren_remover};
 use swc_core::ecma::transforms::base::resolver;
 use swc_core::ecma::visit::VisitMutWith;
 
@@ -72,6 +72,15 @@ fn minify_module(cm: &Lrc<SourceMap>, module: Module) -> Module {
     let mut program = Program::Module(module);
     // A fresh resolver pass over the merged module so the minifier sees consistent scopes/marks.
     program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, false));
+    // The compressor works on a tree WITHOUT `Expr::Paren` (swc's own pipeline removes them first; the
+    // `fixer` below puts back the ones the output needs). Its passes tell a function by the node's kind,
+    // and a parenthesised one — `const set = ((...args) => { … }) as any`, what a TS cast leaves — is
+    // not seen as one: the sequence merger (`merge_sequential_expr`) then moves an assignment into the
+    // arrow's body, to the variable's one textual use there. An inlined function's argument
+    // (`host = () => this`) ended up assigned inside its first closure — `(e = () => this)().put(a)` —
+    // and unset for every other closure of the body until that one ran: `set.append` threw "not a
+    // function" (the SDK's `screen.widgets.append`, checks/uiflow).
+    program.visit_mut_with(&mut paren_remover(None));
 
     let mut program = optimize(
         program,
