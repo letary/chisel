@@ -347,11 +347,32 @@ impl Visit for Collector<'_> {
         }
     }
 
+    /// `super.name` reads a member like `this.name` does (a node of its own, not a `MemberExpr`):
+    /// the name is presence. Without it a method reached ONLY through `super.name(…)` — a wrapper's
+    /// constructor calling the base's listener setter — was dropped while its call stayed.
+    fn visit_super_prop_expr(&mut self, s: &SuperPropExpr) {
+        match &s.prop {
+            SuperProp::Ident(name) => self.out.push(Edge::Instance(name.sym.clone())),
+            SuperProp::Computed(c) => match &*c.expr {
+                Expr::Lit(Lit::Str(v)) => {
+                    self.out.push(Edge::Instance(Atom::from(v.value.as_str().unwrap_or(""))));
+                    self.note_str(v.value.as_str().unwrap_or(""));
+                }
+                other => other.visit_with(self),
+            },
+        }
+    }
+
     fn visit_call_expr(&mut self, n: &CallExpr) {
         // A dynamic computed call `obj[k](...)` could dispatch any method name → keep them all.
         // (Numeric/string-literal keys are not dynamic; string keys are handled as member reads.)
         if let Callee::Expr(callee) = &n.callee {
-            if let Expr::Member(MemberExpr { prop: MemberProp::Computed(c), .. }) = &**callee {
+            let key = match &**callee {
+                Expr::Member(MemberExpr { prop: MemberProp::Computed(c), .. }) => Some(c),
+                Expr::SuperProp(SuperPropExpr { prop: SuperProp::Computed(c), .. }) => Some(c),
+                _ => None,
+            };
+            if let Some(c) = key {
                 if !matches!(&*c.expr, Expr::Lit(Lit::Num(_)) | Expr::Lit(Lit::Str(_))) {
                     self.out.push(Edge::AllInstance);
                 }

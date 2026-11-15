@@ -209,6 +209,27 @@ fn m3_instance_method_dce() {
 }
 
 #[test]
+fn m3_super_member_call_keeps_the_method() {
+    // `on` is reached ONLY through `super.on(…)` (no `x.on` anywhere): it must survive with its call.
+    let out = run_inject(
+        &[
+            ("/main.ts", "const b = new Bar()\nconsole.log(b.count)"),
+            ("/sdk/inject.ts", "export { Bar } from './bar'"),
+            (
+                "/sdk/bar.ts",
+                "class Base {\n  count = 0\n  on(cb: () => void): this { this.count++; return this }\n  dead(): number { return 1 }\n}\nexport class Bar extends Base {\n  constructor() { super(); super.on(() => {}) }\n  override on(cb: () => void): this { return super.on(cb) }\n}",
+            ),
+        ],
+        &["/sdk/inject.ts"],
+    );
+    assert!(out.error.is_none(), "error: {:?}", out.error);
+    let c = out.code;
+    assert!(c.contains("super.on("), "the super call stays:\n{c}");
+    assert!(c.contains("on(cb)"), "a method reached only through `super.on` must survive:\n{c}");
+    assert!(!c.contains("dead"), "an unused method is still dropped:\n{c}");
+}
+
+#[test]
 fn m3_numeric_index_does_not_keep_all_methods() {
     // `v[0]` is array indexing, not a dynamic method dispatch — it must NOT force keeping every method.
     let out = run_inject(
